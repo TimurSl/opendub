@@ -1,0 +1,12 @@
+node_modules/
+data/
+runtime-data/
+.env
+.env.*
+!.env.example
+coverage/
+*.log
+.DS_Store
+
+# Local Workshop content is not part of this runtime's source distribution.
+example_pack/

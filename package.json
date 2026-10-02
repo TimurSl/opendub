@@ -1,0 +1,10 @@
+{
+  "name": "open-dub-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Independent self-hosted browser dubbing runtime for local Workshop packs",
+  "engines": { "node": ">=22" },
+  "scripts": { "start": "node server/index.js", "test": "node --test tests/*.test.js" },
+  "dependencies": { "express": "^5.1.0", "multer": "^2.0.2", "ws": "^8.18.3" }
+}

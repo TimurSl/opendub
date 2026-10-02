@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open Dub</title><link rel="stylesheet" href="/player/styles.css"></head>
+<body>
+<a href="#stage" class="skip-link">Skip to the recording</a>
+<main id="stage" class="stage">
+<header class="stage-header"><h1 id="pack-title">Join the dub</h1><p id="line-number" class="line-number" aria-live="polite" hidden></p></header>
+<p id="notice" class="notice" role="alert" hidden></p>
+<section id="join-panel" class="quiet-screen">
+<h2 id="join-heading">What should we call you?</h2>
+<p id="invitation-missing" hidden>Open the invitation from your host to join.</p>
+<form id="join-form" class="join-form"><label for="nickname">Nickname</label><input id="nickname" name="nickname" autocomplete="nickname" maxlength="40" aria-describedby="notice" required><button id="join-button" type="submit">JOIN</button></form>
+</section>
+<div id="room-panel" hidden>
+<section id="role-panel" class="quiet-screen" hidden><h2 id="role-title" tabindex="-1">Your characters</h2><ul id="assigned-characters" class="characters"></ul><button id="ready" type="button">READY</button></section>
+<section id="waiting-panel" class="quiet-screen" hidden><h2 id="waiting-title" tabindex="-1">Waiting for the host</h2><p id="waiting-message">You’ll get your characters soon.</p><p id="waiting-detail" hidden></p></section>
+<section id="recording-panel" hidden aria-label="Record your line">
+<div class="video-frame"><video id="line-video" muted playsinline preload="metadata" aria-label="Scene for your line"></video><div id="countdown" class="countdown" role="status" aria-live="assertive" hidden></div></div>
+<div class="line-content"><h2 id="line-character"></h2><p id="line-caption" class="caption"></p></div>
+<canvas id="recording-waveform" class="waveform" height="58" aria-hidden="true"></canvas>
+<progress id="recording-progress" class="recording-progress" max="1" value="0" aria-label="Recording progress" hidden></progress>
+<div class="recording-controls"><button id="original" type="button" class="secondary">ORIGINAL</button><button id="record" type="button" class="record-button">RECORD</button><button id="my-take" type="button" class="secondary">MY TAKE</button><button id="next" type="button">NEXT</button></div>
+<p id="recorder-status" class="recorder-status" role="status" aria-live="polite"></p>
+<audio id="reference-audio" preload="none" hidden></audio><audio id="take-review" preload="none" hidden></audio>
+</section>
+<section id="playback-panel" hidden aria-label="Watch the dub"><div id="playback-root"></div></section>
+</div>
+</main><script type="module" src="/player/app.js"></script>
+</body></html>
