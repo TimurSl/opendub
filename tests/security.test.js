@@ -7,6 +7,7 @@ import { startFixtureRuntime, webmBytes } from './helpers.js';
 async function recordingHost(t, options = {}) {
   const host = await startFixtureRuntime(t, options);
   const selected = await host.select();
+  assert.equal((await host.admin('/api/admin/open-lobby', {})).status, 200);
   const player = await host.join(selected.session, 'Recorder');
   assert.equal((await host.admin('/api/admin/distribute', {})).status, 200);
   assert.equal((await host.admin('/api/admin/start', {})).status, 200);
@@ -89,13 +90,16 @@ test('admin pages and API enforce the host source-address allowlist, including e
 });
 
 test('nickname, assignment, and upload metadata are validated on the server', async (t) => {
-  const host = await recordingHost(t);
+  const lobby = await startFixtureRuntime(t);
+  const selected = await lobby.select();
+  assert.equal((await lobby.admin('/api/admin/open-lobby', {})).status, 200);
   for (const nickname of ['', 'x'.repeat(256), 42, null, { html: '<script>' }]) {
-    const result = await host.request('/api/join', { method: 'POST', body: {
-      roomId: host.selected.session.id, joinToken: host.selected.session.joinToken, nickname,
+    const result = await lobby.request('/api/join', { method: 'POST', body: {
+      roomId: selected.session.id, joinToken: selected.session.joinToken, nickname,
     } });
     assert.equal(result.status, 400, JSON.stringify(result.data));
   }
+  const host = await recordingHost(t);
   assert.ok([400, 404].includes((await host.admin('/api/admin/assign', { character: 'Unknown', playerId: host.player.id })).status));
   assert.ok([400, 404].includes((await host.admin('/api/admin/assign', { character: 'Alice', playerId: 'unknown-player' })).status));
   assert.ok([400, 404].includes((await host.upload(host.player, 'unknown-line')).status));
@@ -203,4 +207,141 @@ test('an in-flight upload is stale after host requests a retake on an empty line
   const state = (await host.admin('/api/state')).data;
   assert.equal(state.session.lineTakes['01_alice'], undefined);
   assert.equal(state.session.completedLineCount, 0);
+});
+
+// These are the requests Nginx sends over WireGuard after terminating HTTPS.
+// node:http preserves Host, unlike fetch implementations that override it.
+function proxyRequest(host, route, { body, headers = {}, localAddress = '127.0.0.2' } = {}) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(host.base + route, {
+      localAddress, method: body === undefined ? 'GET' : 'POST',
+      headers: Object.fromEntries(Object.entries({
+        Host: 'dub.example.com', Origin: 'https://dub.example.com',
+        'X-Forwarded-Proto': 'https', 'Sec-Fetch-Site': 'same-origin',
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers,
+      }).filter(([, value]) => value !== undefined)),
+    }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('error', reject);
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString();
+        let data;
+        try { data = JSON.parse(text); } catch { data = text; }
+        resolve({ status: response.statusCode, headers: response.headers, data });
+      });
+    });
+    request.on('error', reject);
+    request.end(body === undefined ? undefined : JSON.stringify(body));
+  });
+}
+
+function proxySocket(host, cookie, headers = {}, localAddress = '127.0.0.2') {
+  return new WebSocket(host.base.replace('http:', 'ws:') + '/ws?viewer=player', {
+    localAddress, headers: {
+      Host: 'dub.example.com', Origin: 'https://dub.example.com',
+      'X-Forwarded-Proto': 'https', Cookie: cookie, ...headers,
+    },
+  });
+}
+
+async function rejectedSocket(socket) {
+  return new Promise((resolve, reject) => {
+    socket.once('unexpected-response', (_request, response) => {
+      response.resume(); socket.terminate(); resolve(response.statusCode);
+    });
+    socket.once('error', error => { if (!error.message.includes('before the connection')) reject(error); });
+    socket.once('open', () => { socket.terminate(); reject(new Error('Rejected origin WebSocket was accepted')); });
+  });
+}
+
+test('trusted HTTPS proxy supports joining, cookies, player actions, media, and WebSockets over HTTP', async t => {
+  // An expanded IPv4-mapped address must match the real IPv4 connection too.
+  const host = await startFixtureRuntime(t, { trustedProxy: ' ::ffff:7f00:2 , 2001:db8::1 ' });
+  const selected = await host.select();
+  assert.equal((await host.admin('/api/admin/open-lobby', {})).status, 200);
+  assert.equal((await proxyRequest(host, '/join/' + selected.session.id)).status, 200);
+  const joined = await proxyRequest(host, '/api/join', { body: {
+    roomId: selected.session.id, joinToken: selected.session.joinToken, nickname: 'Proxy player',
+  } });
+  assert.equal(joined.status, 200, JSON.stringify(joined.data));
+  const cookieHeader = joined.headers['set-cookie'][0];
+  assert.match(cookieHeader, /; Secure/i);
+  assert.match(cookieHeader, /; HttpOnly/i);
+  assert.match(cookieHeader, /; SameSite=Strict/i);
+  const cookie = cookieHeader.split(';')[0];
+  const headers = { Cookie: cookie };
+  assert.equal((await proxyRequest(host, '/api/state?viewer=player', { headers })).status, 200);
+  assert.equal((await proxyRequest(host, '/api/player/claim', { headers, body: { character: 'Alice' } })).status, 200);
+  const media = await proxyRequest(host, joined.data.session.pack.videoUrl, { headers: { ...headers, Range: 'bytes=0-3' } });
+  assert.equal(media.status, 206);
+  assert.equal(media.data, 'OggS');
+  const socket = proxySocket(host, cookie);
+  t.after(() => socket.terminate());
+  const state = await new Promise((resolve, reject) => {
+    socket.once('message', message => resolve(JSON.parse(message)));
+    socket.once('error', reject);
+    socket.once('unexpected-response', (_request, response) => {
+      response.resume(); reject(new Error('Proxy WebSocket rejected: ' + response.statusCode));
+    });
+  });
+  assert.equal(state.viewer.playerId, joined.data.viewer.playerId);
+  // Proxy trust never grants admin access, even with a valid secret and spoofed client IP.
+  assert.equal((await proxyRequest(host, '/api/admin/login', {
+    body: { token: host.adminToken }, headers: { 'X-Forwarded-For': '127.0.0.1' },
+  })).status, 403);
+  assert.equal((await proxyRequest(host, '/api/admin/packs', {
+    headers: { Authorization: 'Bearer ' + host.adminToken, 'X-Forwarded-For': '127.0.0.1' },
+  })).status, 403);
+  assert.equal((await proxyRequest(host, '/%61dmin.html')).status, 403);
+});
+
+test('forwarded HTTPS is ignored without explicit proxy trust, including PUBLIC_LINK', async t => {
+  for (const options of [{ trustedProxy: '' }, { trustedProxy: '', publicLink: 'https://dub.example.com' }, { trustedProxy: '127.0.0.3' }]) {
+    const host = await startFixtureRuntime(t, options);
+    const selected = await host.select();
+    const body = { roomId: selected.session.id, joinToken: selected.session.joinToken, nickname: 'Untrusted' };
+    const joined = await proxyRequest(host, '/api/join', { body });
+    assert.equal(joined.status, 403);
+    assert.equal(joined.data.error, 'Origin does not match runtime');
+    const direct = await proxyRequest(host, '/api/join', {
+      body, headers: { Origin: 'http://dub.example.com' },
+    });
+    assert.equal(direct.status, 200);
+    assert.doesNotMatch(direct.headers['set-cookie'][0], /; Secure/i);
+    assert.equal(await rejectedSocket(proxySocket(host, direct.headers['set-cookie'][0].split(';')[0])), 403);
+  }
+});
+
+test('trusted proxies still reject foreign origins, rewritten hosts, and ambiguous forwarded schemes', async t => {
+  const host = await startFixtureRuntime(t, { trustedProxy: '127.0.0.2' });
+  const selected = await host.select();
+  const player = await host.join(selected.session, 'Local player');
+  const body = { roomId: selected.session.id, joinToken: selected.session.joinToken, nickname: 'Rejected' };
+  for (const headers of [
+    { Origin: 'https://unrelated.example' },
+    { Host: 'internal.example', 'X-Forwarded-Host': 'dub.example.com' },
+    { 'Sec-Fetch-Site': 'cross-site' },
+    { 'X-Forwarded-Proto': 'https,http' },
+    { 'X-Forwarded-Proto': 'https, https' },
+    { 'X-Forwarded-Proto': 'HTTPS' },
+    { 'X-Forwarded-Proto': 'ftp' },
+    { 'X-Forwarded-Proto': '' },
+    { 'X-Forwarded-Proto': ['https', 'https'] },
+  ]) {
+    assert.equal((await proxyRequest(host, '/api/join', { body, headers })).status, 403, JSON.stringify(headers));
+    assert.equal(await rejectedSocket(proxySocket(host, player.cookie, headers)), 403, JSON.stringify(headers));
+  }
+  // A trusted address without a forwarded scheme falls back to the actual HTTP transport.
+  const fallback = await proxyRequest(host, '/api/join', {
+    body, headers: { Origin: 'http://dub.example.com', 'X-Forwarded-Proto': undefined },
+  });
+  assert.equal(fallback.status, 200);
+  assert.doesNotMatch(fallback.headers['set-cookie'][0], /; Secure/i);
+});
+
+test('proxy trust configuration accepts only explicit IP addresses', async t => {
+  for (const trustedProxy of [true, '*', '10.0.0.0/8', 'localhost', 'fe80::1%wg0', '127.0.0.1,', '127.0.0.1,,127.0.0.2']) {
+    await assert.rejects(() => startFixtureRuntime(t, { trustedProxy }), /TRUSTED_PROXY/);
+  }
 });

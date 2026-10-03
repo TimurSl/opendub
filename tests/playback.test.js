@@ -46,7 +46,7 @@ test('finished or exhausted recordings are never scheduled with negative duratio
   assert.equal(audioWindow(4, 2, 0, 0, 10), null);
 });
 
-function playerHarness(t, { fetcher, initialContextState = 'suspended' } = {}) {
+function playerHarness(t, { fetcher, initialContextState = 'suspended', player = true } = {}) {
   const names = ['window', 'document', 'fetch', 'requestAnimationFrame', 'cancelAnimationFrame'];
   const originals = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   class Element extends EventTarget {
@@ -54,6 +54,7 @@ function playerHarness(t, { fetcher, initialContextState = 'suspended' } = {}) {
     append(...children) { this.children.push(...children); }
     setAttribute(name, value) { this.attributes[name] = value; }
     removeAttribute(name) { delete this.attributes[name]; }
+    canPlayType() { return ''; }
     pause() { this.paused = true; }
     play() { this.paused = false; return Promise.resolve(); }
     load() {}
@@ -80,7 +81,7 @@ function playerHarness(t, { fetcher, initialContextState = 'suspended' } = {}) {
   globalThis.requestAnimationFrame = callback => { frames.set(++frameId, callback); return frameId; };
   globalThis.cancelAnimationFrame = id => frames.delete(id);
   const root = new Element('div'); const errors = []; const client = { now: 10000, serverNow() { return this.now; } };
-  const playback = new DubPlayback(root, client, error => errors.push(error.message), { player: true });
+  const playback = new DubPlayback(root, client, error => errors.push(error.message), { player });
   t.after(() => {
     playback.stop();
     for (const [name, descriptor] of originals) {
@@ -111,6 +112,32 @@ test('player viewer exposes one accessible control and preloads quietly before a
   await playback.unlock();
   assert.equal(playback.context.state, 'running');
   assert.equal(playback.context.starts.length, 0); // READY never starts a movie.
+});
+
+test('player refreshes the video source when its URL changes within the same session and pack', (t) => {
+  const { playback, state } = playerHarness(t);
+  const initial = state();
+  playback.setState(initial);
+  assert.equal(playback.video.src, '/video');
+
+  const refreshed = state();
+  refreshed.session.pack.videoUrl = '/video.mp4';
+  playback.setState(refreshed);
+
+  assert.equal(playback.video.src, '/video.mp4');
+});
+
+test('host preview refreshes the video source when its URL changes within the same pack', (t) => {
+  const { playback, state } = playerHarness(t, { player: false });
+  const initial = state();
+  playback.setState(initial);
+  assert.equal(playback.video.src, '/video');
+
+  const refreshed = state();
+  refreshed.session.pack.videoUrl = '/video.mp4';
+  playback.setState(refreshed);
+
+  assert.equal(playback.video.src, '/video.mp4');
 });
 
 test('unlocked player starts automatically; PAUSE survives repeated snapshots and PLAY catches up', async (t) => {

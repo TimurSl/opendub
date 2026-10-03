@@ -21,6 +21,8 @@ export class LineRecorder {
     this.progress = document.getElementById('recording-progress');
     this.countdown = document.getElementById('countdown');
     this.buttons = Object.fromEntries(['original', 'record', 'my-take', 'next'].map(id => [id, document.getElementById(id)]));
+    this.effects = document.getElementById('effect-row'); this.currentEffect = 'normal';
+    this.mediaAnalyserNodes = new Map(); this.activeAnalyser = null;
     this.buttons.original.addEventListener('click', () => this.playOriginal().catch(() => this.mediaError()));
     this.buttons['my-take'].addEventListener('click', () => this.playTake().catch(() => this.mediaError()));
     this.buttons.record.addEventListener('click', () => {
@@ -64,12 +66,83 @@ export class LineRecorder {
   currentSave() { return this.saveJob?.generation === this.generation ? this.saveJob : null; }
   updateControls() {
     const capturing = activeCapture(this.mode); const accepting = this.mode === 'accepting';
-    this.buttons.original.disabled = !this.line || capturing || accepting;
+    const set = (button, icon, label, description, pressed = false) => {
+      button.querySelector('.control-icon').textContent = icon;
+      button.querySelector('.control-label').textContent = label;
+      button.setAttribute('aria-label', description);
+      button.setAttribute('aria-pressed', String(pressed));
+    };
+    const originalActive = this.mode === 'original'; const takeActive = this.mode === 'my-take';
+    const recordingActive = ['countdown', 'recording'].includes(this.mode);
+    set(this.buttons.original, originalActive ? '■' : '♫', originalActive ? 'Stop' : 'Original', originalActive ? 'Stop original playback' : 'Play original line', originalActive);
+    set(this.buttons.record, recordingActive ? '■' : '●', recordingActive ? 'Stop' : 'Record', recordingActive ? 'Stop recording' : 'Record your line', this.mode === 'recording');
+    set(this.buttons['my-take'], takeActive ? '■' : '↻', takeActive ? 'Stop' : 'My take', takeActive ? 'Stop your take' : 'Play your take', takeActive);
+    set(this.buttons.next, '➜', 'Next', 'Save take and continue');
+    this.buttons.original.disabled = !this.line || capturing || accepting || this.settings?.referencePlaybackEnabled === false;
     this.buttons['my-take'].disabled = !this.line || !this.hasTake() || capturing || accepting;
     this.buttons.next.disabled = !this.line || !this.allowed || !this.hasTake() || capturing || accepting;
     this.buttons.record.disabled = !this.line || !this.allowed || accepting || this.mode === 'requesting';
-    this.buttons.record.textContent = ['countdown', 'recording'].includes(this.mode) ? 'STOP' : 'RECORD';
-    this.buttons.record.setAttribute('aria-pressed', this.mode === 'recording' ? 'true' : 'false');
+    if (this.effects) {
+      const enabled = this.settings?.voiceEffectsEnabled !== false;
+      for (const button of this.effects.querySelectorAll('[data-effect]')) button.disabled = !enabled || capturing;
+    }
+  }
+  ensureAudioContext() {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return null;
+    try { this.audioContext ??= new AudioContext(); return this.audioContext; } catch { return null; }
+  }
+  ensureMediaAnalyser(element) {
+    const context = this.ensureAudioContext();
+    if (!context || !element) return null;
+    if (this.mediaAnalyserNodes.has(element)) return this.mediaAnalyserNodes.get(element).analyser;
+    try {
+      const source = context.createMediaElementSource(element); const analyser = context.createAnalyser();
+      analyser.fftSize = 512; analyser.smoothingTimeConstant = 0.72;
+      source.connect(analyser); analyser.connect(context.destination);
+      this.mediaAnalyserNodes.set(element, { source, analyser });
+      return analyser;
+    } catch { return null; }
+  }
+  setEffect(effect) {
+    if (!['normal', 'echo', 'phone', 'robot'].includes(effect) || activeCapture(this.mode)) return;
+    this.currentEffect = this.settings?.voiceEffectsEnabled === false ? 'normal' : effect;
+    if (this.micSource && this.audioContext) this.buildMicGraph();
+    this.updateControls();
+  }
+  buildMicGraph() {
+    if (!this.audioContext || !this.micSource) return;
+    const context = this.audioContext;
+    this.micSource.disconnect();
+    for (const node of this.effectNodes || []) { try { node.disconnect(); } catch {} }
+    if (this.robotOscillator) { try { this.robotOscillator.stop(); } catch {} this.robotOscillator = null; }
+    this.effectNodes = [];
+    const analyser = context.createAnalyser(); analyser.fftSize = 512; analyser.smoothingTimeConstant = 0.76;
+    const destination = this.captureDestination ??= context.createMediaStreamDestination();
+    let output = this.micSource;
+    const keep = node => { this.effectNodes.push(node); return node; };
+    if (this.currentEffect === 'phone') {
+      const high = keep(context.createBiquadFilter()); high.type = 'highpass'; high.frequency.value = 430;
+      const low = keep(context.createBiquadFilter()); low.type = 'lowpass'; low.frequency.value = 3200;
+      output.connect(high); high.connect(low); output = low;
+    } else if (this.currentEffect === 'robot') {
+      const modulated = keep(context.createGain()); modulated.gain.value = 0.62;
+      const oscillator = context.createOscillator(); oscillator.type = 'square'; oscillator.frequency.value = 28;
+      const depth = keep(context.createGain()); depth.gain.value = 0.3;
+      oscillator.connect(depth); depth.connect(modulated.gain); oscillator.start(); this.robotOscillator = oscillator;
+      output.connect(modulated); output = modulated;
+    } else if (this.currentEffect === 'echo') {
+      const dry = keep(context.createGain()); dry.gain.value = 0.78;
+      const delay = keep(context.createDelay(0.6)); delay.delayTime.value = 0.22;
+      const feedback = keep(context.createGain()); feedback.gain.value = 0.24;
+      const wet = keep(context.createGain()); wet.gain.value = 0.48;
+      const mix = keep(context.createGain());
+      output.connect(dry); output.connect(delay); delay.connect(feedback); feedback.connect(delay); delay.connect(wet);
+      dry.connect(mix); wet.connect(mix); output = mix;
+    }
+    output.connect(analyser); analyser.connect(destination);
+    this.captureAnalyser = analyser; this.analyser = analyser; this.activeAnalyser = analyser;
+    this.waveFrequencyData = new Uint8Array(analyser.frequencyBinCount);
   }
   async enableMicrophone() {
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !globalThis.MediaRecorder) throw new Error('Microphone access required');
@@ -84,16 +157,13 @@ export class LineRecorder {
         this.friendly('Microphone access required'); this.updateControls();
       }));
       this.micSource?.disconnect();
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      if (AudioContext) {
+      const context = this.ensureAudioContext();
+      if (context) {
         try {
-        this.audioContext ??= new AudioContext();
-        this.analyser = this.audioContext.createAnalyser(); this.analyser.fftSize = 256;
-        this.micSource = this.audioContext.createMediaStreamSource(stream);
-        this.micSource.connect(this.analyser);
-        this.waveData = new Uint8Array(this.analyser.fftSize);
-        this.audioContext.resume().catch(() => {});
-        } catch { this.analyser = null; }
+          this.micSource = context.createMediaStreamSource(stream);
+          context.resume().catch(() => {});
+          this.buildMicGraph();
+        } catch { this.analyser = null; this.captureDestination = null; }
       }
     } catch { throw new Error('Microphone access required'); }
     this.updateControls();
@@ -107,6 +177,7 @@ export class LineRecorder {
       this.abort('', true);
     }
     this.allowed = allowed; this.settings = settings; this.line = line; this.packId = pack?.id;
+    if (settings?.voiceEffectsEnabled === false && this.currentEffect !== 'normal') this.setEffect('normal');
     if (pack && this.video.getAttribute('src') !== pack.videoUrl) {
       this.stopMedia(); this.video.src = pack.videoUrl; this.video.muted = true;
     }
@@ -154,11 +225,18 @@ export class LineRecorder {
     if (this.startListener) { this.video.removeEventListener('playing', this.startListener); this.startListener = null; }
     this.video.pause(); this.reference.pause(); this.review.pause(); this.video.muted = true;
     if (['original', 'my-take'].includes(this.mode)) this.mode = this.hasTake() ? 'review' : 'idle';
+    this.activeAnalyser = this.captureAnalyser || null;
+    this.drawWaveform(false); this.updateControls();
   }
   async playFragment(audio, mode, fallback = false, padded = false) {
     if (!this.line || activeCapture(this.mode) || this.mode === 'accepting') return;
     this.stopMedia(); const generation = this.generation; const mediaGeneration = this.mediaGeneration;
     const line = this.line;
+    const mediaElement = audio || this.video;
+    const context = this.ensureAudioContext();
+    this.activeAnalyser = this.ensureMediaAnalyser(mediaElement) || null;
+    if (context?.state === 'suspended') context.resume().catch(() => {});
+    this.mode = mode; this.updateControls(); this.drawWaveform(true);
     const fragmentStart = padded ? Math.max(0, line.startTime - (this.settings?.previewBefore ?? 1.5)) : line.startTime;
     const fragmentEnd = padded ? line.endTime + (this.settings?.previewAfter ?? 0.5) : line.endTime;
     await this.seek(fragmentStart);
@@ -169,7 +247,7 @@ export class LineRecorder {
       audio.currentTime = 0;
     }
     if (generation !== this.generation || mediaGeneration !== this.mediaGeneration) return;
-    this.mode = mode; this.video.muted = !fallback;
+    this.video.muted = !fallback;
     this.status.textContent = mode === 'original' ? 'Original' : 'My take';
     let voiceStarted = false;
     const startAudio = () => {
@@ -192,12 +270,15 @@ export class LineRecorder {
       if (this.video.currentTime >= fragmentEnd || this.video.ended) {
         this.stopMedia(); this.status.textContent = this.hasTake() ? 'Take ready' : ''; this.updateControls(); return;
       }
+      if (!this.reducedMotion) this.drawWaveform(true);
       this.frame = requestAnimationFrame(step);
     };
     this.frame = requestAnimationFrame(step); this.updateControls();
   }
   async playOriginal() {
     if (!this.line) return;
+    if (this.settings?.referencePlaybackEnabled === false) return;
+    if (this.mode === 'original') { this.stopMedia(); this.status.textContent = this.hasTake() ? 'Take ready' : ''; return; }
     if (this.line.referenceAudio) {
       this.reference.src = this.line.referenceAudio;
       await this.playFragment(this.reference, 'original', false, true);
@@ -205,8 +286,14 @@ export class LineRecorder {
   }
   async playTake() {
     if (!this.hasTake()) return;
+    if (this.mode === 'my-take') { this.stopMedia(); this.status.textContent = 'Take ready'; return; }
     this.review.src = this.objectUrl || this.savedTake.url;
     await this.playFragment(this.review, 'my-take');
+  }
+  pauseCapture() {
+    if (this.mode === 'recording') this.stopRecording();
+    else if (['requesting', 'countdown'].includes(this.mode)) this.cancelRecording();
+    else if (['original', 'my-take'].includes(this.mode)) this.stopMedia();
   }
   captureBackup() {
     return { blob: this.blob, objectUrl: this.objectUrl, savedTake: this.savedTake, savedBlob: this.savedBlob, dismissedTakeId: this.dismissedTakeId };
@@ -233,7 +320,7 @@ export class LineRecorder {
     if (generation !== this.generation) return;
     this.countdown.hidden = true;
     const mimeType = chooseRecordingMime(); const chunks = [];
-    const recorder = new MediaRecorder(this.stream, mimeType ? { mimeType } : undefined);
+    const recorder = new MediaRecorder(this.captureDestination?.stream || this.stream, mimeType ? { mimeType } : undefined);
     this.recorder = recorder;
     recorder.addEventListener('dataavailable', event => { if (event.data.size) chunks.push(event.data); });
     recorder.addEventListener('error', () => {
@@ -262,6 +349,7 @@ export class LineRecorder {
       this.mode = 'recording'; this.status.textContent = 'Recording'; this.waveform.hidden = false;
       if (this.progress) { this.progress.max = line.duration; this.progress.value = 0; this.progress.hidden = false; }
       this.updateControls();
+      this.drawWaveform(true);
       let previousTime = this.video.currentTime; let lastAdvance = performance.now(); let lastSemantic = 0;
       const step = () => {
         if (generation !== this.generation || recorder.state !== 'recording') return;
@@ -271,7 +359,7 @@ export class LineRecorder {
           this.cancelRecording(); this.friendly('Recording failed — try again'); return;
         }
         if (this.video.currentTime >= line.endTime || this.video.ended) { this.stopRecording(); return; }
-        this.drawWaveform();
+        if (!this.reducedMotion) this.drawWaveform(true);
         if (now - lastSemantic > 250) {
           if (this.progress) this.progress.value = Math.max(0, Math.min(line.duration, this.video.currentTime - line.startTime));
           lastSemantic = now;
@@ -284,20 +372,47 @@ export class LineRecorder {
     this.video.muted = true; this.video.addEventListener('playing', start, { once: true });
     try { await this.video.play(); } catch (error) { this.video.removeEventListener('playing', start); throw error; }
   }
-  drawWaveform(idle = false) {
-    const context = this.waveform.getContext('2d');
-    if (!context) return;
-    const width = this.waveform.width; const height = this.waveform.height;
-    context.clearRect(0, 0, width, height); context.strokeStyle = '#c84334'; context.lineWidth = 2;
-    context.beginPath();
-    if (!idle && this.analyser && !this.reducedMotion) {
-      this.analyser.getByteTimeDomainData(this.waveData);
-      for (let index = 0; index < this.waveData.length; index++) {
-        const x = index * width / (this.waveData.length - 1); const y = (this.waveData[index] / 255) * height;
-        if (index) context.lineTo(x, y); else context.moveTo(x, y);
+  drawWaveform(active = false) {
+    if (!this.waveform) return;
+    const bounds = this.waveform.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return;
+    const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
+    const pixelWidth = Math.round(bounds.width * pixelRatio); const pixelHeight = Math.round(bounds.height * pixelRatio);
+    if (this.waveform.width !== pixelWidth || this.waveform.height !== pixelHeight) {
+      this.waveform.width = pixelWidth; this.waveform.height = pixelHeight;
+    }
+    const context = this.waveform.getContext('2d'); if (!context) return;
+    const width = bounds.width; const height = bounds.height;
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0); context.clearRect(0, 0, width, height);
+    const recording = this.mode === 'recording'; const playing = ['original', 'my-take'].includes(this.mode);
+    const analyser = recording ? this.captureAnalyser : playing ? this.activeAnalyser : null;
+    const data = analyser ? (this.waveFrequencyData ??= new Uint8Array(analyser.frequencyBinCount)) : null;
+    if (analyser && data) analyser.getByteFrequencyData(data);
+    const count = Math.max(32, Math.min(168, Math.floor(width / 7)));
+    const gap = 3; const barWidth = Math.max(2, (width - gap * (count - 1)) / count);
+    const maximum = height * 0.43; const center = height / 2;
+    const glow = !this.reducedMotion && (active || recording || playing);
+    const gradient = context.createLinearGradient(0, center - maximum, 0, center + maximum);
+    gradient.addColorStop(0, '#a78bfa'); gradient.addColorStop(.48, '#78e3d0'); gradient.addColorStop(1, '#ff76a1');
+    context.fillStyle = gradient; context.shadowColor = '#a877ff'; context.shadowBlur = glow ? 10 : 0;
+    const phase = this.reducedMotion ? 0 : performance.now() * .004;
+    let seed = 0; for (const char of String(this.line?.id || 'open-dub')) seed = (seed * 31 + char.charCodeAt(0)) >>> 0;
+    for (let index = 0; index < count; index++) {
+      let strength;
+      if (data?.length) {
+        const sample = data[Math.min(data.length - 1, Math.floor(index / count * data.length))] / 255;
+        strength = Math.max(.035, Math.pow(sample, .8));
+      } else {
+        const curve = Math.abs(Math.sin((index + (seed % 19)) * .73));
+        const pulse = Math.abs(Math.sin(index * .19 - phase));
+        strength = recording || playing || active ? .12 + curve * (.28 + pulse * .56) : .07 + curve * .2;
       }
-    } else { context.moveTo(0, height / 2); context.lineTo(width, height / 2); }
-    context.stroke();
+      const barHeight = Math.max(4, strength * maximum * 1.9);
+      const x = index * (barWidth + gap); const y = center - barHeight / 2;
+      if (context.roundRect) { context.beginPath(); context.roundRect(x, y, barWidth, barHeight, Math.min(4, barWidth / 2)); context.fill(); }
+      else context.fillRect(x, y, barWidth, barHeight);
+    }
+    context.shadowBlur = 0;
   }
   stopRecording() {
     if (this.mode !== 'recording' || this.recorder?.state !== 'recording') return;

@@ -146,6 +146,7 @@ export class SessionStore extends EventEmitter {
   join({ roomId, joinToken, nickname }) {
     if (roomId !== this.data.id || joinToken !== this.data.joinToken) fail("Invalid room or join token", 403);
     if (!this.pack) fail("Host has not selected a pack", 409);
+    if (!["lobby", "assignment"].includes(this.data.state) || this.data.rolesLocked) fail("This game has started. Ask the host for help", 409);
     if (typeof nickname !== "string" || nickname.trim().length < 1 || nickname.trim().length > 40 || /[\u0000-\u001f\u007f]/.test(nickname)) fail("Nickname must be 1–40 printable characters");
     const player = { id: randomId(), token: randomId(32), nickname: nickname.trim(), connected: false };
     this.data.players.push(player);
@@ -192,16 +193,27 @@ export class SessionStore extends EventEmitter {
     if (owner === playerId) return;
     if (owner) fail("That character is already taken", 409);
     if (this.assignedCharacters(playerId).length >= this.roleLimit()) fail("You have reached your role limit", 409);
-    this.data.roleAssignments[character] = playerId;
-    delete this.data.readyPlayers[playerId];
+    this.assign(character, playerId);
     this.maybeLockRoles();
   }
   releaseRole(character, playerId) {
     if (!this.pack?.characters.includes(character)) fail("Unknown character", 404);
     if (this.data.state !== "assignment" || this.data.rolesLocked) fail("Role selection is locked", 409);
     if (this.data.roleAssignments[character] !== playerId) fail("That character is not yours", 403);
+    this.unassignRole(character);
+  }
+  unassignRole(character) {
+    if (!this.pack?.characters.includes(character)) fail("Unknown character", 404);
+    if (this.data.state === "playback" || this.data.state === "lobby") fail("Roles cannot be changed now", 409);
+    const previousOwner = this.data.roleAssignments[character];
+    if (!previousOwner) return;
     delete this.data.roleAssignments[character];
-    delete this.data.readyPlayers[playerId];
+    for (const line of this.pack.lines.filter(line => line.character === character)) {
+      this.data.lineVersions[line.id] = (this.data.lineVersions[line.id] ?? 0) + 1;
+      const take = this.data.lineTakes[line.id];
+      if (take?.status !== "accepted") delete this.data.lineTakes[line.id];
+    }
+    delete this.data.readyPlayers[previousOwner];
   }
   setPlayerReady(playerId, ready) {
     if (!this.findPlayer(playerId)) fail("Unknown player", 404);
@@ -257,7 +269,7 @@ export class SessionStore extends EventEmitter {
     this.data.state = this.allComplete() ? "review" : "recording";
   }
   pause() {
-    if (this.data.state !== "recording") fail("Session is not recording", 409);
+    if (this.data.state !== "recording" && !(this.data.state === "paused" && this.data.pausedFrom === "recording")) fail("Session is not recording", 409);
     this.data.pausedFrom = this.data.state;
     this.data.state = "paused";
   }

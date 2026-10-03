@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { isIP } from "node:net";
 import { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack } from "./workshop/parser.js";
 import { SessionStore, fail, randomId } from "./session/store.js";
 export { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack, SessionStore };
@@ -20,6 +21,43 @@ function equalToken(left, right) {
 }
 function local(req) {
   return ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress);
+}
+function publicOrigin(value) {
+  if (value == null || (typeof value === "string" && !value.trim())) return "";
+  if (typeof value !== "string") throw new Error("PUBLIC_LINK must be an absolute HTTP or HTTPS URL");
+  let parsed;
+  try { parsed = new URL(value.trim()); } catch { throw new Error("PUBLIC_LINK must be an absolute HTTP or HTTPS URL"); }
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new Error("PUBLIC_LINK must be an absolute HTTP or HTTPS URL");
+  }
+  return parsed.origin;
+}
+function normalizedAddress(address) {
+  if (typeof address !== "string" || address.includes("%")) return null;
+  if (isIP(address) === 4) return address;
+  if (isIP(address) !== 6) return null;
+  const canonical = new URL("http://[" + address + "]").hostname.slice(1, -1);
+  const mapped = /^::ffff:([0-9a-f]+):([0-9a-f]+)$/.exec(canonical);
+  if (!mapped) return canonical;
+  const high = parseInt(mapped[1], 16), low = parseInt(mapped[2], 16);
+  return [high >> 8, high & 255, low >> 8, low & 255].join(".");
+}
+function trustedProxyAddresses(value) {
+  if (value == null || (typeof value === "string" && !value.trim())) return new Set();
+  if (typeof value !== "string") throw new Error("TRUSTED_PROXY must be a comma-separated list of IP addresses");
+  const addresses = value.split(",").map(address => normalizedAddress(address.trim()));
+  if (addresses.some(address => !address)) throw new Error("TRUSTED_PROXY must be a comma-separated list of IP addresses");
+  return new Set(addresses);
+}
+function requestProtocol(req, trustedProxy) {
+  if (req.socket.encrypted) return "https:";
+  // Only the directly connected proxy can attest to the public scheme. Never
+  // use X-Forwarded-For/Host to extend that trust or grant local admin access.
+  if (!trustedProxy.has(normalizedAddress(req.socket.remoteAddress))) return "http:";
+  const forwarded = req.headers["x-forwarded-proto"];
+  if (forwarded === undefined) return "http:";
+  if (forwarded !== "http" && forwarded !== "https") fail("Invalid proxy protocol header", 403);
+  return forwarded + ":";
 }
 function cookies(req) {
   const result = Object.create(null);
@@ -41,13 +79,13 @@ function validateBody(req, shape = {}) {
   }
   return body;
 }
-function checkOrigin(req) {
+function checkOrigin(req, trustedProxy) {
   const origin = req.headers.origin;
   if (req.headers["sec-fetch-site"] === "cross-site") fail("Cross-site requests are forbidden", 403);
   if (!origin) return;
   let parsed;
   try { parsed = new URL(origin); } catch { fail("Invalid Origin", 403); }
-  const protocol = req.socket.encrypted ? "https:" : "http:";
+  const protocol = requestProtocol(req, trustedProxy);
   if (parsed.protocol !== protocol || parsed.host !== req.headers.host) fail("Origin does not match runtime", 403);
 }
 async function signature(file, mime) {
@@ -98,10 +136,10 @@ async function exportDub(pack, dataDir, ffmpegPath, acceptedTakes) {
       const copy = path.join(work, index + ".audio");
       await fs.copyFile(take.path, copy);
       args.push("-i", copy);
-      voiceInputs.push({ input: index + 2, delay: Math.max(0, Math.round(line.startTime * 1000)), key: `voice${index}` });
+      voiceInputs.push({ input: index + 2, delay: Math.max(0, Math.round(line.startTime * 1000)), duration: line.duration, key: `voice${index}` });
     }
     const filters = ["[1:a]asetpts=PTS-STARTPTS[base]"];
-    for (const voice of voiceInputs) filters.push(`[${voice.input}:a]asetpts=PTS-STARTPTS,adelay=${voice.delay}:all=1[${voice.key}]`);
+    for (const voice of voiceInputs) filters.push(`[${voice.input}:a]atrim=duration=${voice.duration.toFixed(6)},asetpts=PTS-STARTPTS,adelay=${voice.delay}:all=1[${voice.key}]`);
     const sources = ["[base]", ...voiceInputs.map(voice => `[${voice.key}]`)].join("");
     filters.push(`${sources}amix=inputs=${voiceInputs.length + 1}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]`);
     args.push(
@@ -113,8 +151,11 @@ async function exportDub(pack, dataDir, ffmpegPath, acceptedTakes) {
       const process = spawn(ffmpegPath, args, { stdio: ["ignore", "ignore", "pipe"] });
       let stderr = "";
       process.stderr.on("data", chunk => { if (stderr.length < 4000) stderr += chunk; });
-      process.on("error", () => reject(new Error("ffmpeg is unavailable; install it or set FFMPEG_PATH")));
-      process.on("exit", code => code === 0 ? resolve() : reject(new Error("Video export failed: " + stderr.trim().slice(-1800))));
+      process.on("error", () => { const error = new Error("ffmpeg is unavailable; install it or set FFMPEG_PATH"); error.status = 503; reject(error); });
+      process.on("exit", code => {
+        if (code === 0) resolve();
+        else { const error = new Error("Video export failed: " + stderr.trim().slice(-1800)); error.status = 422; reject(error); }
+      });
     });
     return { id, output };
   } catch (error) {
@@ -130,6 +171,8 @@ export async function createRuntime(options = {}) {
   const dataDir = path.resolve(options.dataDir ?? process.env.DATA_DIR ?? "./data");
   const host = options.host ?? process.env.HOST ?? "0.0.0.0";
   const port = Number(options.port ?? process.env.PORT ?? 7373);
+  const publicLink = publicOrigin(options.publicLink ?? process.env.PUBLIC_LINK);
+  const trustedProxy = trustedProxyAddresses(options.trustedProxy ?? process.env.TRUSTED_PROXY);
   const adminToken = options.adminToken ?? process.env.ADMIN_TOKEN ?? randomId(32);
   const maxUploadBytes = Number(options.maxUploadBytes ?? Number(process.env.MAX_UPLOAD_MB ?? 25) * 1024 * 1024);
   const previewBefore = Number(options.previewBefore ?? process.env.PREVIEW_BEFORE ?? 1.5);
@@ -152,9 +195,10 @@ export async function createRuntime(options = {}) {
   app.use((req, res, next) => {
     res.set({ "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Cross-Origin-Resource-Policy": "same-origin", "Cache-Control": "no-store", "Permissions-Policy": "microphone=(self)" });
     res.set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
-    try { if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) checkOrigin(req); next(); } catch (error) { next(error); }
+    try { if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) checkOrigin(req, trustedProxy); next(); } catch (error) { next(error); }
   });
   app.use(express.json({ limit: "16kb", strict: true }));
+  app.get("/api/config", (req, res) => res.json({ publicLink }));
   function auth(req, requireKind) {
     const cookie = cookies(req);
     const bearer = /^Bearer ([A-Za-z0-9_-]+)$/.exec(req.headers.authorization ?? "")?.[1];
@@ -181,7 +225,7 @@ export async function createRuntime(options = {}) {
   }
   const authenticated = kind => (req, res, next) => { try { req.viewer = auth(req, kind); next(); } catch (error) { next(error); } };
   const snapshot = (req, res) => res.json(store.snapshot(req.viewer));
-  const setCookie = (req, res, name, token) => res.cookie(name, token, { httpOnly: true, sameSite: "strict", secure: !!req.socket.encrypted, path: "/", maxAge: 30 * 24 * 60 * 60 * 1000 });
+  const setCookie = (req, res, name, token) => res.cookie(name, token, { httpOnly: true, sameSite: "strict", secure: requestProtocol(req, trustedProxy) === "https:", path: "/", maxAge: 30 * 24 * 60 * 60 * 1000 });
   app.post("/api/admin/login", async (req, res) => {
     if (!local(req)) fail("Admin login is available only on the host PC", 403);
     const { token } = validateBody(req, { token: "string" });
@@ -194,7 +238,17 @@ export async function createRuntime(options = {}) {
     discovered.packs = refreshed.packs;
     discovered.errors = refreshed.errors;
     store.packs = new Map(refreshed.packs.map(pack => [pack.id, pack]));
-    res.json({ packs: discovered.packs.map(pack => ({ id: pack.id, metadata: pack.metadata, characters: pack.characters, lineCount: pack.lines.length, iconUrl: store.pack?.id === pack.id ? pack.iconUrl : null })), errors: discovered.errors });
+    res.json({ packs: discovered.packs.map(pack => ({ id: pack.id, metadata: pack.metadata, characters: pack.characters, lineCount: pack.lines.length, characterCount: pack.characters.length, iconUrl: pack.icon ? `/api/admin/packs/${encodeURIComponent(pack.id)}/icon` : null })), errors: discovered.errors });
+  });
+  app.get("/api/admin/packs/:packId/icon", authenticated("admin"), async (req, res) => {
+    const pack = store.packs.get(req.params.packId);
+    if (!pack?.icon) fail("Pack icon not found", 404);
+    const asset = Object.values(pack.assets).find(item => item.path === pack.icon);
+    if (!asset) fail("Pack icon not found", 404);
+    const real = await fs.realpath(asset.path);
+    const relative = path.relative(pack.directory, real);
+    if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) fail("Pack icon is outside its directory", 403);
+    res.type(asset.type); res.sendFile(real);
   });
   const adminAction = (route, shape, operation) => app.post("/api/admin/" + route, authenticated("admin"), async (req, res) => {
     const body = validateBody(req, shape);
@@ -216,6 +270,7 @@ export async function createRuntime(options = {}) {
   adminAction("lock-roles", {}, () => store.lockRoles());
   adminAction("reopen-roles", {}, () => store.reopenRoles());
   adminAction("assign", { character: "string", playerId: "string" }, ({ character, playerId }) => store.assign(character, playerId));
+  adminAction("unassign", { character: "string" }, ({ character }) => store.unassignRole(character));
   adminAction("distribute", {}, () => store.distribute());
   adminAction("fill-unassigned", {}, () => store.fillUnassigned());
   adminAction("start", {}, () => store.startRecording());
@@ -364,7 +419,7 @@ export async function createRuntime(options = {}) {
   server.on("upgrade", (req, socket, head) => {
     try {
       if (new URL(req.url, "http://runtime.local").pathname !== "/ws") fail("Unknown WebSocket route", 404);
-      checkOrigin(req);
+      checkOrigin(req, trustedProxy);
       const viewer = auth(req);
       websocket.handleUpgrade(req, socket, head, ws => websocket.emit("connection", ws, req, viewer));
     } catch (error) { socket.write("HTTP/1.1 " + (error.status ?? 400) + " Rejected\r\nConnection: close\r\n\r\n"); socket.destroy(); }

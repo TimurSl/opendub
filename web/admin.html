@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Host studio — Open Dub</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="admin-page">
+  <header>
+    <div class="topbar">
+      <div class="brand">Open Dub <small>Host studio</small></div>
+      <span id="connection" class="connection" role="status">Local admin access</span>
+    </div>
+  </header>
+  <main>
+    <div id="error" class="error" role="alert" hidden></div>
+    <section id="login-panel" class="panel narrow">
+      <h1>Open host studio</h1>
+      <p class="muted">Use the admin token printed when this runtime started. Admin access is local to this computer.</p>
+      <form id="login-form">
+        <div class="field"><label for="admin-token">Admin token</label><input id="admin-token" type="password" autocomplete="off" required></div>
+        <button id="login-button">Open studio</button>
+      </form>
+    </section>
+    <div id="admin-panel" hidden>
+      <div class="admin-heading">
+        <div><p class="eyebrow">SESSION GUIDE</p><h1 id="stage-heading">Choose a pack</h1></div>
+        <span id="phase" class="status-label"></span>
+      </div>
+      <nav class="stage-nav" aria-label="Session stages">
+        <ol>
+          <li id="stage-indicator-1"><button id="stage-button-1" type="button" aria-label="Step 1: Pack" aria-controls="screen-packs" data-stage="1"><span>1</span><small aria-hidden="true">Pack</small></button></li>
+          <li id="stage-indicator-2"><button id="stage-button-2" type="button" aria-label="Step 2: Setup" aria-controls="screen-setup" data-stage="2"><span>2</span><small aria-hidden="true">Setup</small></button></li>
+          <li id="stage-indicator-3"><button id="stage-button-3" type="button" aria-label="Step 3: Roles" aria-controls="screen-roles" data-stage="3"><span>3</span><small aria-hidden="true">Roles</small></button></li>
+          <li id="stage-indicator-4"><button id="stage-button-4" type="button" aria-label="Step 4: Record" aria-controls="screen-recording" data-stage="4"><span>4</span><small aria-hidden="true">Record</small></button></li>
+          <li id="stage-indicator-5"><button id="stage-button-5" type="button" aria-label="Step 5: Review" aria-controls="screen-review" data-stage="5"><span>5</span><small aria-hidden="true">Review</small></button></li>
+          <li id="stage-indicator-6"><button id="stage-button-6" type="button" aria-label="Step 6: Playback" aria-controls="screen-playback" data-stage="6"><span>6</span><small aria-hidden="true">Playback</small></button></li>
+        </ol>
+      </nav>
+      <section id="screen-packs" class="panel admin-screen">
+        <div class="section-heading"><div><h2>Choose a pack</h2><p class="muted">Pick the story everyone will dub together.</p></div><button id="refresh-packs" class="secondary">Refresh packs</button></div>
+        <div id="pack-errors" class="notice" hidden></div>
+        <div class="pack-list-actions"><button id="back-to-setup" class="secondary" hidden>Back to setup</button></div>
+        <div id="packs" class="pack-list"></div>
+      </section>
+
+      <section id="screen-setup" class="panel admin-screen" hidden>
+        <div class="section-heading"><div><p class="eyebrow">SESSION SETUP</p><h2 id="selected-title"></h2><p id="selected-metadata" class="muted"></p></div><button id="change-pack" type="button" class="secondary">Change pack</button></div>
+        <div class="invite-block">
+          <label for="join-url">Player invitation</label>
+          <div class="copy-field"><input id="join-url" readonly><button id="copy-join" class="secondary">Copy link</button></div>
+          <div class="room-code"><span>Room code</span><strong id="room-code"></strong></div>
+          <p class="help">Players can join before you open role selection. Microphone recording requires a secure browser connection.</p>
+        </div>
+        <form id="settings-form" class="settings-grid">
+          <label class="setting"><input id="free-role-picking" type="checkbox"><span><strong>Players choose their roles</strong><small>Players can claim free characters themselves.</small></span></label>
+          <label class="setting"><input id="multiple-roles" type="checkbox"><span><strong>Allow multiple roles</strong><small>One player may take more than one character.</small></span></label>
+          <label class="setting setting-number"><span><strong>Maximum roles per player</strong><small>Use 0 for no limit.</small></span><input id="max-roles" type="number" min="0" step="1" value="0"></label>
+          <label class="setting"><input id="auto-balance" type="checkbox"><span><strong>Suggest a balance for free roles</strong><small>Offer automatic assignments for characters nobody has claimed.</small></span></label>
+          <label class="setting"><input id="lock-when-ready" type="checkbox"><span><strong>Lock when everyone is ready</strong><small>Role selection locks after every player confirms.</small></span></label>
+          <label class="setting"><input id="reference-enabled" type="checkbox"><span><strong>Reference playback</strong><small>Let players hear the original line before recording.</small></span></label>
+          <label class="setting"><input id="effects-enabled" type="checkbox"><span><strong>Voice effects</strong><small>Enable Echo, Phone, and Robot capture effects.</small></span></label>
+          <label class="setting"><input id="compact-mobile" type="checkbox"><span><strong>Prefer compact controls on phones</strong><small>Use a tighter recording layout on small screens.</small></span></label>
+          <div class="settings-actions"><button id="save-settings" type="submit">Save session settings</button><button id="open-lobby" type="button" class="secondary">Open lobby</button></div>
+        </form>
+      </section>
+
+      <section id="screen-roles" class="admin-screen" hidden>
+        <div class="admin-columns">
+          <section class="panel">
+            <div class="section-heading"><div><p class="eyebrow">ROLE SELECTION</p><h2>Characters</h2><p id="role-summary" class="muted"></p></div><button id="fill-unassigned" class="secondary">Balance free roles</button></div>
+            <p class="help">Players can claim free characters. Use the menu beside a character to override an assignment.</p>
+            <div id="roles" class="role-list"></div>
+            <div class="actions space-top"><button id="lock-roles">Lock roles</button><button id="unlock-roles" class="secondary" hidden>Reopen role selection</button><button id="start-recording" class="secondary">Start recording</button></div>
+          </section>
+          <section class="panel">
+            <div class="section-heading"><div><p class="eyebrow">READY CHECK</p><h2>Players</h2></div><span id="role-player-count" class="count"></span></div>
+            <div id="players"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="screen-recording" class="admin-screen" hidden>
+        <section class="panel">
+          <div class="section-heading"><div><p class="eyebrow">RECORDING PROGRESS</p><h2 id="recording-title">Everyone is recording</h2><p id="completion" class="muted"></p></div><span id="recording-state" class="status-label"></span></div>
+          <div id="recording-players" class="progress-list"></div>
+          <div class="incomplete-block"><h3>Lines still in progress</h3><ul id="incomplete-lines" class="incomplete-lines"></ul></div>
+        </section>
+        <section class="panel">
+          <div class="section-heading"><div><h2>Reassign characters</h2><p class="muted">Move unfinished lines when someone disconnects.</p></div><button id="recording-balance" class="secondary">Balance free roles</button></div>
+          <div id="recording-roles" class="role-list"></div>
+        </section>
+        <section class="panel actions">
+          <button id="pause-session" class="secondary">Pause session</button>
+          <button id="resume-session" hidden>Continue recording</button>
+          <button id="reopen-roles" class="secondary">Reopen role selection</button>
+          <button id="continue-review">Continue to review</button>
+        </section>
+      </section>
+
+      <section id="screen-review" class="admin-screen" hidden>
+        <section class="panel">
+          <div class="section-heading"><div><p class="eyebrow">REVIEW</p><h2>Check the takes</h2><p id="review-summary" class="muted"></p></div>
+            <label for="line-filter" class="filter-label">Show <select id="line-filter"><option value="all">All lines</option><option value="pending">Missing lines</option><option value="recorded">Needs review</option><option value="accepted">Accepted</option></select></label>
+          </div>
+          <div id="takes" class="take-list"></div>
+        </section>
+        <section class="panel actions review-actions">
+          <button id="accept-all" class="secondary">Accept all recorded takes</button>
+          <button id="continue-recording" class="secondary">Continue recording</button>
+          <button id="review-playback">Start final playback</button>
+          <button id="skip-missing" class="danger">Skip missing & play</button>
+        </section>
+      </section>
+
+      <section id="screen-playback" class="admin-screen" hidden>
+        <section class="panel">
+          <div class="section-heading"><div><p class="eyebrow">FINAL PLAYBACK</p><h2>The finished dub</h2><p id="final-summary" class="muted"></p></div></div>
+          <div id="playback-root" class="final-playback"></div>
+          <div class="actions final-actions"><button id="restart-playback" class="secondary">Play again for everyone</button><button id="stop-playback" class="secondary">Reopen review</button><button id="export-video">Export video</button></div>
+          <p id="export-status" class="help" role="status" aria-live="polite"></p>
+        </section>
+        <section class="panel restart-panel"><div><h2>Start a new session</h2><p class="muted">This clears the current players and takes and creates a new invitation.</p></div><button id="restart-session" class="danger">Restart session</button></section>
+      </section>
+    </div>
+  </main>
+  <script type="module" src="/admin/app.js"></script>
+</body>
+</html>
