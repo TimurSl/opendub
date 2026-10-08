@@ -12,6 +12,7 @@ import { isIP } from "node:net";
 import { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack } from "./workshop/parser.js";
 import { SessionStore, fail, randomId } from "./session/store.js";
 import { parseCustomAudioArgs, runCustomAudio } from "./custom-audio.js";
+import { soundpadFormat, checkSoundpadFile, runSoundpadAudio } from "./soundpad-audio.js";
 export { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack, SessionStore };
 
 const webDir = fileURLToPath(new URL("../web", import.meta.url));
@@ -401,6 +402,57 @@ export async function createRuntime(options = {}) {
       else { file.recordingMime = mime; done(null, true); }
     },
   }).single("take");
+  const uploadSoundpad = multer({
+    dest: path.join(dataDir, 'tmp'),
+    limits: { fileSize: Math.min(maxUploadBytes, 25 * 1024 * 1024), files: 1, fields: 0, parts: 1, fieldNameSize: 100 },
+    fileFilter(req, file, done) {
+      const mime = file.mimetype.toLowerCase().split(';')[0].trim();
+      if (!soundpadFormat(mime)) { const error = new Error('Unsupported sound format'); error.status = 415; done(error); }
+      else { file.soundpadMime = mime; done(null, true); }
+    },
+  }).single('take');
+  app.post('/api/takes/:lineId/soundpad', authenticated('player'), (req, res, next) => {
+    try {
+      req.soundMatchId = req.get('x-match-id');
+      req.soundRetakeId = req.get('x-retake-id') || '';
+      store.requireMatch(req.soundMatchId);
+      store.requireOwner(req.viewer.playerId, req.params.lineId);
+      if (activeCustomAudioJobs >= 2) fail('Sound processor is busy', 429);
+      const accepted = store.data.lineTakes[req.params.lineId];
+      const retake = store.data.activeRetakes[req.params.lineId];
+      if (accepted?.status === 'accepted' && (!req.soundRetakeId || retake?.id !== req.soundRetakeId || retake.playerId !== req.viewer.playerId)) fail('Start a replacement retake first', 409);
+      if (req.soundRetakeId && (retake?.id !== req.soundRetakeId || retake.playerId !== req.viewer.playerId || retake.matchId !== req.soundMatchId)) fail('Retake changed', 409);
+      req.soundLineVersion = store.data.lineVersions[req.params.lineId] ?? 0;
+      uploadSoundpad(req, res, next);
+    } catch (error) { next(error); }
+  }, async (req, res) => {
+    let outputPath;
+    try {
+      if (!req.file) fail('Multipart field take is required');
+      await checkSoundpadFile(req.file.path, req.file.soundpadMime);
+      store.requireMatch(req.soundMatchId);
+      const line = store.requireOwner(req.viewer.playerId, req.params.lineId);
+      if ((store.data.lineVersions[req.params.lineId] ?? 0) !== req.soundLineVersion) fail('Line changed', 409);
+      if (activeCustomAudioJobs >= 2) fail('Sound processor is busy', 429);
+      activeCustomAudioJobs++;
+      try {
+        outputPath = path.join(dataDir, 'tmp', `soundpad-${randomId(24)}.webm`);
+        await runSoundpadAudio(ffmpegPath, req.file.path, outputPath, req.file.soundpadMime, line.duration);
+        const stats = await fs.stat(outputPath);
+        if (!stats.size || stats.size > maxUploadBytes) fail('Sound conversion exceeded size limit', 413);
+      } finally { activeCustomAudioJobs--; }
+      store.requireMatch(req.soundMatchId);
+      store.requireOwner(req.viewer.playerId, req.params.lineId);
+      if ((store.data.lineVersions[req.params.lineId] ?? 0) !== req.soundLineVersion) fail('Line changed', 409);
+      const retake = store.data.activeRetakes[req.params.lineId];
+      if (req.soundRetakeId && (retake?.id !== req.soundRetakeId || retake.playerId !== req.viewer.playerId)) fail('Retake changed', 409);
+      if (!req.soundRetakeId && store.data.lineTakes[req.params.lineId]?.status === 'accepted') fail('Take was accepted while processing', 409);
+      res.type('audio/webm').send(await fs.readFile(outputPath));
+    } finally {
+      if (req.file) await fs.rm(req.file.path, { force: true }).catch(() => {});
+      if (outputPath) await fs.rm(outputPath, { force: true }).catch(() => {});
+    }
+  });
   // This route is only for applying a tightly allowlisted -af chain to a
   // player's own recording. Raw FFmpeg argv/filtergraphs must never be exposed.
   app.post("/api/takes/:lineId/custom", authenticated("player"), (req, res, next) => {

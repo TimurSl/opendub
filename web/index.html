@@ -73,6 +73,11 @@
           <button id="my-take" type="button" aria-label="Play my take" aria-keyshortcuts="T" disabled>MY TAKE</button>
           <button id="next" type="button" aria-label="Next: accept take and continue" aria-keyshortcuts="N" disabled>NEXT</button>
         </div>
+          <div class="soundpad-import">
+            <button id="soundpad-import" type="button" title="Use an audio clip instead of recording a voice">SOUNDPAD</button>
+            <input id="soundpad-file" type="file" accept=".mp3,.wav,.ogg,.opus,.webm,.m4a,.mp4,.flac,audio/*" aria-label="Choose sound for the line" hidden>
+          </div>
+        <p class="help soundpad-help">SOUNDPAD imports a sound clip as your take, without recording your microphone. Long clips are trimmed to the line plus 2 seconds.</p>
         <div id="effect-row" class="effect-row" role="group" aria-label="Voice effects">
           <span class="effect-label">Voice effect</span>
         </div>

@@ -50,6 +50,23 @@ export class RuntimeClient extends EventTarget {
     if (!response.headers.get('content-type')?.startsWith('audio/webm')) throw new Error('Unexpected Custom effect response');
     return response.blob();
   }
+  async processSoundpadAudio(lineId, file, retakeId = '') {
+    const form = new FormData();
+    form.append('take', file, file.name || 'sound.mp3');
+    const response = await fetch('/api/takes/' + encodeURIComponent(lineId) + '/soundpad', {
+      method: 'POST', credentials: 'same-origin', cache: 'no-store',
+      headers: {
+        'X-Match-ID': this.state?.session?.matchId || '',
+        ...(retakeId ? { 'X-Retake-ID': retakeId } : {}),
+      }, body: form,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || `Sound import failed (${response.status})`);
+    }
+    if (!response.headers.get('content-type')?.startsWith('audio/webm')) throw new Error('Unexpected sound conversion response');
+    return response.blob();
+  }
   receive(next) {
     const sameServer = next.serverId && next.serverId === this.state?.serverId;
     const sameParty = next.session?.id === this.state?.session?.id;

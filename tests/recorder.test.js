@@ -318,6 +318,7 @@ test('the 0.2-second scene lead-in and take-review waits are cancelable and do n
   assert.equal(recorder.mode, 'recording', 'the microphone must remain open for the tail');
   assert.equal(recorder.recorder.state, 'recording');
   assert.ok(recorder.captureTiming.tail >= 0.65);
+  recorder.captureDeadline = performance.now() - 1; // Advance the deterministic test clock past the planned stop.
   recorder.finishRecording(recorder.generation); await turn();
   assert.equal(recorder.mode, 'settling'); assert.equal(savesDuringReviewWait, 1);
   await delay(220);
@@ -646,9 +647,13 @@ test('recording waits for reference overhang and freezes tail at MediaRecorder.s
   assert.equal(recorder.stopRequested, false, 'must not stop at the INI end when reference speech continues');
   recorder.video.currentTime = 12.5;
   frame();
+  assert.equal(recorder.stopRequested, false, 'video jumping ahead must not stop the microphone');
+  recorder.captureCueEndAt = performance.now() - 1;
+  frame();
   assert.equal(recorder.stopRequested, true);
   assert.equal(recorder.captureTiming.tail, 1.15);
   // Skip waiting for the timer. Async encoder finalization should not adjust metadata.
+  recorder.captureDeadline = performance.now() - 1;
   recorder.finishRecording(recorder.pendingStopGeneration);
   const actualTail = recorder.captureTiming.tail;
   recorder.prepareRecordedTake = async () => {};
@@ -658,4 +663,75 @@ test('recording waits for reference overhang and freezes tail at MediaRecorder.s
   await new Promise(resolve => setTimeout(resolve, 15));
   recorder.recorder.dispatchEvent(new Event('stop'));
   assert.equal(recorder.localTiming.tail, actualTail);
+});
+
+test('SOUNDPAD import becomes a normal saved take without applying Custom filters or opening microphone', async t => {
+  const { recorder, calls } = fixture(t, () => snapshot(candidate('from-soundpad')));
+  const decodedLength = 3.1;
+  const output = new Blob(['converted WebM'], { type: 'audio/webm' });
+  recorder.client.processSoundpadAudio = async (lineId, file, retakeId) => {
+    assert.equal(lineId, 'own-line');
+    assert.equal(file.size, 16);
+    assert.equal(retakeId, '');
+    return output;
+  };
+  recorder.decodeAudio = async () => ({ samples: new Float32Array(200), duration: decodedLength, sampleRate: 100 });
+  recorder.setEffect('custom');
+  recorder.client.processCustomAudio = () => { throw new Error('Custom filter must be bypassed by import'); };
+  await recorder.importSound(new Blob(['1234567890123456'], { type: 'audio/wav' }));
+  await turn(); await turn();
+  assert.equal(recorder.blob, output);
+  assert.deepEqual(recorder.localTiming, { leadIn: 0, tail: 1.1 });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, '/api/takes/own-line');
+  assert.equal(await calls[0].body.get('take').text(), await output.text());
+  assert.equal(calls[0].options.takeTiming.tail, 1.1);
+  assert.equal(recorder.buttons.next.disabled, true, 'NEXT unavailable until conversion and settling ends');
+});
+
+test('a rejected soundpad import restores previous take without uploading corrupted data', async t => {
+  const { recorder, localTake, calls } = fixture(t);
+  const old = localTake('old-take'); const oldUrl = recorder.objectUrl;
+  recorder.client.processSoundpadAudio = async () => { throw new Error('Invalid audio file'); };
+  await recorder.importSound(new Blob(['12345'], { type: 'audio/wav' }));
+  assert.equal(recorder.blob, old);
+  assert.equal(recorder.objectUrl, oldUrl);
+  assert.match(recorder.status.textContent, /Invalid audio file/);
+  assert.equal(calls.length, 0);
+});
+
+test('waveform cursor and progress have exactly the same deadline even if the video jumps to the end', async t => {
+  const oldMediaRecorder = Object.getOwnPropertyDescriptor(globalThis, 'MediaRecorder');
+  class Recorder extends EventTarget {
+    static isTypeSupported() { return true; }
+    constructor() { super(); this.state = 'inactive'; this.mimeType = 'audio/webm'; }
+    start() { this.state = 'recording'; }
+    stop() { this.state = 'inactive'; }
+  }
+  Object.defineProperty(globalThis, 'MediaRecorder', { value: Recorder, configurable: true });
+  t.after(() => { if (oldMediaRecorder) Object.defineProperty(globalThis, 'MediaRecorder', oldMediaRecorder); else delete globalThis.MediaRecorder; });
+  const { recorder, frame } = fixture(t);
+  recorder.enableMicrophone = async () => {};
+  recorder.waitCancelable = async () => {};
+  recorder.skipCountdown.checked = true;
+  recorder.captureDestination = { stream: {} };
+  recorder.referenceLoadPromise = Promise.resolve();
+  recorder.cueOverhang = () => 0.5;
+  await recorder.record();
+  const expected = recorder.captureDuration;
+  assert.ok(expected >= 2.5 + 0.65, 'planned interval includes overhang and post-roll');
+  assert.equal(recorder.progress.max, expected);
+  recorder.video.currentTime = 12.5;
+  frame();
+  assert.equal(recorder.stopRequested, false);
+  assert.equal(recorder.recorder.state, 'recording');
+  recorder.captureCueEndAt = performance.now() - 1;
+  frame();
+  assert.equal(recorder.stopRequested, true);
+  assert.equal(recorder.progress.max, expected);
+  assert.equal(recorder.recorder.state, 'recording');
+  recorder.captureDeadline = performance.now() - 1;
+  recorder.finishRecording(recorder.pendingStopGeneration);
+  assert.equal(recorder.recorder.state, 'inactive');
+  assert.equal(recorder.progress.value, recorder.progress.max, 'end of recording coincides with end of waveform');
 });

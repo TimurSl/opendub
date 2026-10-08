@@ -16,3 +16,17 @@ export function referenceOverhang(lineDuration, referenceDuration, postRollSecon
 export function captureTail(overhangSeconds, postRollSeconds) {
   return Math.round(Math.max(0, Math.min(MAX_TAKE_TAIL_SECONDS, overhangSeconds + postRollSeconds)) * 1000) / 1000;
 }
+
+// The capture cursor, the progress bar and MediaRecorder's stop must share
+// ONE monotonic deadline. Video.currentTime can run ahead of wall time.
+export function capturePlan(captureStartMs, cueStartMs, lineSeconds, overhangSeconds, postRollSeconds) {
+  const tail = captureTail(overhangSeconds, postRollSeconds);
+  const deadlineMs = cueStartMs + (lineSeconds + tail) * 1000;
+  return { tail, deadlineMs, duration: Math.max(0, (deadlineMs - captureStartMs) / 1000) };
+}
+
+export function recordedTail(captureStartMs, stopMs, leadInSeconds, lineSeconds) {
+  return Math.round(Math.min(MAX_TAKE_TAIL_SECONDS, Math.max(0,
+    (stopMs - captureStartMs) / 1000 - leadInSeconds - lineSeconds,
+  )) * 1000) / 1000;
+}

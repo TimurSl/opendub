@@ -157,3 +157,7 @@ h2 { margin-bottom: 22px; font-size: clamp(28px, 4vw, 42px); font-weight: 550; l
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; }
 }
+
+.soundpad-import { display: flex; justify-content: center; margin: 12px auto 4px; }
+.soundpad-import button { min-height: 43px; padding: 8px 20px; font-size: 13px; white-space: nowrap; }
+.soundpad-help { text-align: center; margin: 0 auto 14px; font-size: 12px; max-width: 620px; }

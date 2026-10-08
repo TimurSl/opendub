@@ -1,5 +1,5 @@
 import { createLivePeaks, appendLivePeaks } from './live-waveform.js';
-import { referenceOverhang, captureTail } from './cue-timing.js';
+import { referenceOverhang, captureTail, capturePlan, recordedTail } from './cue-timing.js';
 
 const CAPTURE_PRIME_MS = 180; // Start the encoder before the video cue (avoid losing the first phoneme).
 const CAPTURE_TAIL_MS = 650; // Keep the mic live after the video cue ends.
@@ -80,6 +80,14 @@ export class LineRecorder {
       try { globalThis.localStorage?.setItem('open-dub-skip-countdown', String(this.skipCountdown.checked)); } catch {}
     });
     this.buttons = Object.fromEntries(['original', 'record', 'my-take', 'next'].map(id => [id, document.getElementById(id)]));
+    this.soundpadButton = document.getElementById('soundpad-import');
+    this.soundpadInput = document.getElementById('soundpad-file');
+    this.soundpadButton?.addEventListener('click', () => this.soundpadInput?.click());
+    this.soundpadInput?.addEventListener('change', () => {
+      const file = this.soundpadInput.files?.[0];
+      this.soundpadInput.value = ''; // Allow selecting the same sound again.
+      if (file) this.importSound(file).catch(error => this.friendly(`Sound import failed: ${error.message}`));
+    });
     this.effects = document.getElementById('effect-row'); this.currentEffect = 'normal';
     this.customEffectOptions = document.getElementById('custom-effect-options');
     this.customArgsInput = document.getElementById('custom-effect-args');
@@ -96,7 +104,7 @@ export class LineRecorder {
     this.buttons['my-take'].addEventListener('click', () => this.playTake().catch(() => this.mediaError()));
     this.buttons.record.addEventListener('click', () => {
       if (['countdown', 'preroll'].includes(this.mode)) this.cancelRecording();
-      else if (this.mode === 'recording') this.stopRecording();
+      else if (this.mode === 'recording') this.stopRecording(true);
       else this.record().catch(error => {
         this.cancelRecording();
         this.friendly(['Microphone access required', 'Video unavailable — ask host'].includes(error?.message) ? error.message : 'Recording failed — try again');
@@ -164,6 +172,8 @@ export class LineRecorder {
     this.buttons['my-take'].disabled = !this.line || !this.hasPlaybackTake() || capturing || accepting;
     this.buttons.next.disabled = !this.line || !this.allowed || !this.hasTake() || capturing || accepting;
     this.buttons.record.disabled = !this.line || !this.allowed || accepting || this.mode === 'requesting' || this.mode === 'settling' || !!this.stopRequested;
+    if (this.soundpadButton) this.soundpadButton.disabled = !this.line || !this.allowed || capturing || accepting;
+    if (this.soundpadInput) this.soundpadInput.disabled = !this.line || !this.allowed || capturing || accepting;
     if (this.skipCountdown) this.skipCountdown.disabled = capturing || accepting;
     for (const input of this.gainInputs) input.disabled = capturing || accepting;
     for (const output of this.gainOutputs) output.textContent = `${this.microphoneGainPercent}%`;
@@ -806,6 +816,37 @@ export class LineRecorder {
     if (this.backup?.objectUrl && this.backup.objectUrl !== this.objectUrl) URL.revokeObjectURL(this.backup.objectUrl);
     this.backup = null;
   }
+  async importSound(file) {
+    if (!this.line || !this.allowed || activeCapture(this.mode) || this.mode === 'accepting') return;
+    if (!file || !file.size || file.size > 25 * 1024 * 1024) throw new Error('Choose an audio file under 25 MB');
+    this.stopMedia();
+    const generation = ++this.generation; const line = this.line;
+    this.backup = this.captureBackup();
+    this.mode = 'settling'; this.status.textContent = 'Importing sound…'; this.updateControls();
+    try {
+      if (this.acceptedTake && !this.retakeId) {
+        this.retakeAttemptId ||= newRetakeAttemptId();
+        this.retakeAttemptPending = true;
+        const retakeId = await this.resolveRetakeId(line.id, generation);
+        if (generation !== this.generation || !this.allowed) return;
+        if (!retakeId) throw new Error('Retake could not start');
+      }
+      const blob = await this.client.processSoundpadAudio(line.id, file, this.retakeId);
+      if (generation !== this.generation || !this.allowed || this.line?.id !== line.id) return;
+      if (!(blob instanceof Blob) || !blob.size) throw new Error('Audio conversion returned an empty file');
+      const decoded = await this.decodeAudio(await blob.arrayBuffer());
+      if (generation !== this.generation || !this.allowed || this.line?.id !== line.id) return;
+      if (!Number.isFinite(decoded.duration) || decoded.duration <= 0) throw new Error('Could not decode sound');
+      this.localTiming = { leadIn: 0, tail: Math.round(Math.min(2, Math.max(0, decoded.duration - line.duration)) * 1000) / 1000 };
+      this.dismissedTakeId = this.backup?.savedTake?.id ?? this.observedCandidateId;
+      this.takeGeneration++; this.takeSamples = null; this.takeDuration = 0; this.takeSampleRate = 0;
+      this.prepareRecordedTake(blob, line, generation, true).catch(error => {
+        if (generation === this.generation) this.cancelRecording(`Sound import failed: ${error.message}`);
+      });
+    } catch (error) {
+      if (generation === this.generation) this.cancelRecording(`Sound import failed: ${error.message}`);
+    }
+  }
   async record() {
     if (!this.line || !this.allowed || activeCapture(this.mode) || this.mode === 'accepting') return;
     this.audioContext?.resume().catch(() => {});
@@ -854,7 +895,7 @@ export class LineRecorder {
       // Tail was frozen at recorder.stop(), not at this asynchronous event.
       // Finalizing the encoded WebM may take hundreds of milliseconds.
       this.localTiming = this.captureTiming ? { ...this.captureTiming } : null;
-      this.captureTiming = null; this.activeCueOverhang = 0; this.livePeaks = null; this.captureStartedAt = 0; this.stopRequestedAt = 0;
+      this.captureTiming = null; this.activeCueOverhang = 0; this.livePeaks = null; this.captureStartedAt = 0; this.stopRequestedAt = 0; this.captureDeadline = 0; this.captureDuration = 0; this.captureCueEndAt = 0;
       this.stopMedia(); clearTimeout(this.recordingWatchdog);
       if (this.progress) this.progress.hidden = true;
       const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || 'audio/webm' });
@@ -867,6 +908,7 @@ export class LineRecorder {
     // first ~100-200ms. The measured offset travels with the take to playback/export.
     const captureStart = performance.now();
     this.captureStartedAt = captureStart;
+    this.captureDeadline = 0; this.captureCueEndAt = 0; this.captureDuration = 0;
     this.captureTiming = { leadIn: 0, tail: captureTail(overhang, this.effectTailMilliseconds() / 1000) };
     this.livePeaks = createLivePeaks(line.duration + 3);
     this.dismissedTakeId = this.backup?.savedTake?.id ?? this.observedCandidateId;
@@ -895,13 +937,18 @@ export class LineRecorder {
       const leadIn = (performance.now() - captureStart) / 1000;
       if (leadIn > 1) { this.cancelRecording('Video took too long to start — record again'); return; }
       this.captureTiming.leadIn = Math.round(Math.max(0, leadIn) * 1000) / 1000;
-      if (this.progress) this.progress.max = line.duration + this.captureTiming.leadIn + this.captureTiming.tail;
+      const cueStartAt = performance.now();
+      const plan = capturePlan(captureStart, cueStartAt, line.duration, overhang, this.effectTailMilliseconds() / 1000);
+      this.captureCueEndAt = cueStartAt + (line.duration + overhang) * 1000;
+      this.captureDeadline = plan.deadlineMs;
+      this.captureDuration = plan.duration;
+      this.captureTiming.tail = plan.tail;
+      if (this.progress) this.progress.max = this.captureDuration;
       this.mode = 'recording'; this.status.textContent = 'Recording'; this.updateControls();
       this.recordingWatchdog = setTimeout(() => {
         if (generation === this.generation && recorder.state === 'recording') { this.cancelRecording(); this.friendly('Recording failed — try again'); }
       }, (line.duration + 4) * 1000);
-      let previousTime = this.video.currentTime; let lastAdvance = performance.now(); let lastSemantic = 0;
-      const cueStartAt = lastAdvance;
+      let previousTime = this.video.currentTime; let lastAdvance = performance.now();
       const step = () => {
         if (generation !== this.generation || recorder.state !== 'recording') return;
         const now = performance.now();
@@ -914,15 +961,11 @@ export class LineRecorder {
           if ((this.video.ended && this.video.currentTime < line.endTime - 0.05) || (!this.video.ended && now - lastAdvance > 1500)) {
             this.cancelRecording(); this.friendly('Recording failed — try again'); return;
           }
-          // When the video itself ends, use elapsed wall-clock time for the
-          // reference overhang instead of stopping half a second early.
-          if (this.video.currentTime >= line.endTime + overhang ||
-              (this.video.ended && now - cueStartAt >= (line.duration + overhang) * 1000)) this.stopRecording();
+          // Video's media clock may jump ahead (or the last frame may end
+          // before the MP3). Never let it stop the actual microphone capture.
+          if (now >= this.captureCueEndAt) this.stopRecording();
         }
-        if (now - lastSemantic > 250) {
-          if (this.progress) this.progress.value = Math.max(0, Math.min(this.progress.max, (now - this.captureStartedAt) / 1000));
-          lastSemantic = now;
-        }
+        if (this.progress) this.progress.value = Math.max(0, Math.min(this.progress.max, (now - this.captureStartedAt) / 1000));
         this.frame = requestAnimationFrame(step);
       };
       this.frame = requestAnimationFrame(step);
@@ -942,11 +985,11 @@ export class LineRecorder {
     appendLivePeaks(this.livePeaks, (performance.now() - this.captureStartedAt) / 1000, data);
   }
 
-  async prepareRecordedTake(blob, line, generation) {
+  async prepareRecordedTake(blob, line, generation, imported = false) {
     if (generation !== this.generation) return;
-      this.mode = 'settling'; this.status.textContent = this.currentEffect === 'custom' ? 'Applying Custom FFmpeg effect…' : 'Finishing take…'; this.updateControls();
+      this.mode = 'settling'; this.status.textContent = !imported && this.currentEffect === 'custom' ? 'Applying Custom FFmpeg effect…' : 'Finishing take…'; this.updateControls();
       let finishedBlob = blob;
-      if (this.currentEffect === 'custom') {
+      if (!imported && this.currentEffect === 'custom') {
         try {
           finishedBlob = await this.client.processCustomAudio(line.id, blob, this.customArgs, this.retakeId);
           if (!(finishedBlob instanceof Blob) || !finishedBlob.size) throw new Error('Empty Custom FFmpeg result');
@@ -990,7 +1033,10 @@ export class LineRecorder {
     const leadIn = timing?.leadIn || 0; const tail = timing?.tail || 0;
     const visibleOverhang = isCapturing ? (this.activeCueOverhang || 0) : referenceOverhang(this.line?.duration || 0, this.referenceDuration, 0);
     const visibleReferenceDuration = Math.min(this.referenceDuration, (this.line?.duration || 0) + visibleOverhang);
-    const duration = Math.max((this.line?.duration || 0) + leadIn + tail, visibleReferenceDuration + leadIn, this.takeDuration, 0.05);
+    // One duration for the live waveform, playhead and progress bar.
+    // In particular, never add a reference tail beyond the actual capture.
+    const duration = isCapturing && this.captureDuration > 0 ? this.captureDuration
+      : Math.max((this.line?.duration || 0) + leadIn + tail, visibleReferenceDuration + leadIn, this.takeDuration, 0.05);
     const drawSamples = (samples, sampleRate, sampleDuration, color, alpha, offset = 0) => {
       if (!samples?.length || !sampleRate || !sampleDuration) return;
       context.globalAlpha = alpha; context.strokeStyle = color; context.lineWidth = 1;
@@ -1033,7 +1079,7 @@ export class LineRecorder {
     }
   }
 
-  stopRecording() {
+  stopRecording(manual = false) {
     if (this.mode !== 'recording' || this.recorder?.state !== 'recording' || this.stopRequested) return;
     this.video.pause(); clearTimeout(this.recordingWatchdog);
     this.stopRequested = true; this.pendingStopGeneration = this.generation; this.stopRequestedAt = performance.now();
@@ -1041,9 +1087,14 @@ export class LineRecorder {
     // The microphone stays live for the tail and the recorder stops afterward.
     if (this.currentEffect === 'walkieTalkie') this.effectProcessor?.port.postMessage({ type: 'endingClick' });
     this.status.textContent = 'Capturing the end…'; this.updateControls();
-    const tailMs = this.effectTailMilliseconds();
-    if (this.captureTiming) this.captureTiming.tail = captureTail(this.activeCueOverhang, tailMs / 1000);
-    this.stopFallbackTimer = setTimeout(() => this.finishRecording(this.pendingStopGeneration), tailMs);
+    if (manual) {
+      // STOP is allowed early, so shorten the waveform to the new real stop.
+      this.captureDeadline = this.stopRequestedAt + this.effectTailMilliseconds();
+      this.captureDuration = (this.captureDeadline - this.captureStartedAt) / 1000;
+    }
+    if (this.progress) this.progress.max = this.captureDuration;
+    this.stopFallbackTimer = setTimeout(() => this.finishRecording(this.pendingStopGeneration),
+      Math.max(0, Math.ceil(this.captureDeadline - performance.now())));
   }
   effectTailMilliseconds() {
     return ({ echo: 850, cave: 1100 })[this.currentEffect] ?? CAPTURE_TAIL_MS;
@@ -1051,19 +1102,24 @@ export class LineRecorder {
   finishRecording(generation) {
     clearTimeout(this.stopFallbackTimer);
     if (generation !== this.generation || this.recorder?.state !== 'recording') return;
-    this.pendingStopGeneration = null;
-    // Freeze the measured tail at the exact stop request; stop/dataavailable
-    // events run later and must not stretch the waveform/export metadata.
-    if (this.captureTiming && this.stopRequestedAt) {
-      this.captureTiming.tail = captureTail(this.activeCueOverhang, (performance.now() - this.stopRequestedAt) / 1000);
+    // A delayed or early timer should not make the playhead and the audio diverge.
+    if (performance.now() + 2 < this.captureDeadline) {
+      this.stopFallbackTimer = setTimeout(() => this.finishRecording(generation), Math.ceil(this.captureDeadline - performance.now()));
+      return;
     }
+    this.pendingStopGeneration = null;
+    const finishedAt = performance.now();
+    if (this.captureTiming) this.captureTiming.tail = recordedTail(this.captureStartedAt, finishedAt,
+      this.captureTiming.leadIn, this.line?.duration || 0);
+    if (this.progress) { this.progress.max = this.captureDuration; this.progress.value = this.captureDuration; }
+    this.sampleLiveWaveform(); this.drawWaveform(true);
     try { this.recorder.stop(); } catch {}
   }
   cancelRecording(message = '', discard = false) {
     this.generation++; this.cancelPendingWaits(); this.stopMedia(); clearTimeout(this.recordingWatchdog); clearTimeout(this.stopFallbackTimer);
     this.takeGeneration++;
     this.stopRequested = false; this.pendingStopGeneration = null;
-    this.captureTiming = null; this.activeCueOverhang = 0; this.livePeaks = null; this.captureStartedAt = 0; this.stopRequestedAt = 0;
+    this.captureTiming = null; this.activeCueOverhang = 0; this.livePeaks = null; this.captureStartedAt = 0; this.stopRequestedAt = 0; this.captureDeadline = 0; this.captureDuration = 0; this.captureCueEndAt = 0;
     this.countdown.hidden = true; this.waveform.hidden = false;
     if (this.progress) this.progress.hidden = true;
     if (this.recorder?.state === 'recording') { try { this.recorder.stop(); } catch {} }
