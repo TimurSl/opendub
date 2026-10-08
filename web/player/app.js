@@ -229,25 +229,25 @@ function render(snapshot) {
   const line = pack?.lines.find(item => item.id === selectedLineId);
   const finalPlayback = session.state === 'playback';
   const hasUnfinishedRequiredLine = session.completedLineCount < session.totalLineCount;
-  const { needsReady, showRoles, canPick, canReady } = roleView({
-    state: session.state, hasPack: !!pack, lineMode, hasTasks, prepared,
-    incomplete: hasUnfinishedRequiredLine, rolesLocked: session.rolesLocked,
+  const { showRoles, canPick, canReady } = roleView({
+    state: session.state, hasPack: !!pack, lineMode, hasTasks, rolesLocked: session.rolesLocked,
   });
   const recordingLine = ['recording', 'review', 'paused'].includes(session.state) && !!line && hasTasks;
-  const recording = recordingLine && !needsReady;
+  const recording = recordingLine;
   const ownedActiveRetake = line && session.activeRetakes?.find(item => item.lineId === line.id && item.playerId === snapshot.viewer.playerId);
   const hasRetakeAttemptForTab = !!(recorder.retakeId || recorder.retakeAttemptPending);
   const lineAllowed = canRecordSelectedLine({
-    state: session.state, hasTasks, lineId: line?.id, prepared, hasUnfinishedRequiredLine,
+    state: session.state, hasTasks, lineId: line?.id, hasUnfinishedRequiredLine,
     activeRetakeLineId: ownedActiveRetake?.lineId, hasRetakeAttemptForTab,
   });
   const done = ['recording', 'review', 'paused'].includes(session.state) && hasTasks && !queue.pendingLines.length;
-  if (session.state === 'paused' || (needsReady && recordingLine)) recorder.pauseCapture();
+  if (session.state === 'paused') recorder.pauseCapture();
   $('join-panel').hidden = true; $('room-panel').hidden = false;
   $('pack-title').textContent = pack?.metadata.title || 'Your party';
   $('pack-title').parentElement.hidden = finalPlayback;
   $('role-panel').hidden = !showRoles;
   $('recording-panel').hidden = !recording;
+  $('recording-microphone-help').hidden = !recording || microphoneReady();
   $('playback-panel').hidden = !finalPlayback;
   $('waiting-panel').hidden = showRoles || recording || finalPlayback;
   const showLineNavigation = hasTasks && ['recording', 'review', 'paused'].includes(session.state);
@@ -279,8 +279,8 @@ function render(snapshot) {
   }
   $('cancel-retake').hidden = !(recorder.retakeId || recorder.retakeAttemptPending);
   $('cancel-retake').disabled = picker.disabled;
-  const viewLine = recordingLine && !needsReady ? line : null;
-  recorder.setLine(pack, viewLine, lineAllowed && !needsReady, session.settings, session.state === 'paused', session.matchId);
+  const viewLine = recordingLine ? line : null;
+  recorder.setLine(pack, viewLine, lineAllowed, session.settings, session.state === 'paused', session.matchId);
   if (viewLine) recorder.setTakes(session.lineTakes[line.id], session.lineTakes[line.id]?.status === 'accepted' ? session.lineTakes[line.id] : null, session.replacementTakes?.[line.id]);
   if (recording) {
     $('line-number').hidden = false;

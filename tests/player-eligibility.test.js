@@ -16,10 +16,12 @@ test('global completion does not open another line or a different tab', () => {
   assert.equal(canRecordSelectedLine({ ...common, lineId: 'line-b', activeRetakeLineId: 'line-b', hasRetakeAttemptForTab: false }), false);
 });
 
-test('unfinished lines remain recordable and capture still requires recording state and readiness', () => {
+test('unfinished lines are available at Start Recording even before microphone permission', () => {
   const common = { state: 'recording', hasTasks: true, lineId: 'line-b', prepared: true, hasUnfinishedRequiredLine: true };
   assert.equal(canRecordSelectedLine(common), true);
   assert.equal(canRecordSelectedLine({ ...common, state: 'review' }), false);
-  assert.equal(canRecordSelectedLine({ ...common, prepared: false }), false);
+  assert.equal(canRecordSelectedLine({ ...common, prepared: false }), true, 'RECORD obtains microphone permission on demand');
   assert.equal(canRecordSelectedLine({ ...common, hasTasks: false }), false);
+  assert.equal(canRecordSelectedLine({ ...common, state: 'assignment' }), false);
+  assert.equal(canRecordSelectedLine({ ...common, state: 'paused' }), false);
 });

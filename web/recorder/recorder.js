@@ -466,6 +466,9 @@ export class LineRecorder {
       }
     } catch { throw new Error('Microphone access required'); }
     this.updateControls();
+    // The recording screen may be open before READY; refresh its permission
+    // hint immediately after the microphone is granted, not on the next poll.
+    this.client.dispatchEvent(new Event('microphone'));
   }
   cancelPendingWaits() {
     for (const wait of this.waits) { clearTimeout(wait.timer); wait.resolve(); }

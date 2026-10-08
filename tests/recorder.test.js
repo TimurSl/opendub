@@ -735,3 +735,17 @@ test('waveform cursor and progress have exactly the same deadline even if the vi
   assert.equal(recorder.recorder.state, 'inactive');
   assert.equal(recorder.progress.value, recorder.progress.max, 'end of recording coincides with end of waveform');
 });
+
+test('RECORD and SOUNDPAD remain enabled at the start of recording without a microphone', async t => {
+  const { recorder } = fixture(t);
+  assert.equal(recorder.stream, null);
+  assert.equal(recorder.buttons.record.disabled, false);
+  assert.equal(recorder.soundpadButton.disabled, false);
+  let permissionRequests = 0;
+  recorder.enableMicrophone = async () => {
+    permissionRequests++;
+    recorder.generation++; // Simulate the player leaving during the browser permission prompt.
+  };
+  await recorder.record();
+  assert.equal(permissionRequests, 1, 'RECORD requests microphone permission on the user gesture');
+});

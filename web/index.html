@@ -58,6 +58,7 @@
         </div>
         <p id="waveform-legend" class="waveform-legend"><span><i class="reference-swatch"></i>Original</span><span><i class="take-swatch"></i>Your take</span><span id="waveform-status" role="status">Loading original waveform…</span></p>
         <canvas id="recording-waveform" class="waveform" height="72" aria-hidden="true"></canvas>
+        <p id="recording-microphone-help" class="help" role="status" hidden>Press RECORD to enable your microphone, or use SOUNDPAD without a microphone.</p>
         <div id="microphone-meter-wrap-recording" class="microphone-meter-wrap" hidden><span>Microphone level</span><canvas id="live-microphone-meter-recording" height="14" role="img" aria-label="Live microphone level"></canvas></div>
         <label class="mic-gain-control recording-gain" for="mic-gain-recording"><span>Amplify microphone <output id="mic-gain-value-recording" for="mic-gain-recording">100%</output></span><input id="mic-gain-recording" type="range" min="0" max="300" step="5" value="100"></label>
         <progress id="recording-progress" class="recording-progress" max="1" value="0" aria-label="Recording progress" hidden></progress>

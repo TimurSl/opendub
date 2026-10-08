@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SessionStore } from '../server/session/store.js';
 import { roleView } from '../web/player/view-state.js';
+import { canRecordSelectedLine } from '../web/player/eligibility.js';
 import { currentStage, reconcileStage } from '../web/admin/stage.js';
 
 const pack = {
@@ -12,7 +13,7 @@ const pack = {
 
 function view(state, overrides = {}) {
   return roleView({ state, hasPack: true, lineMode: false, hasTasks: false,
-    prepared: false, incomplete: true, rolesLocked: false, ...overrides });
+    rolesLocked: false, ...overrides });
 }
 
 test('clients can see and take roles immediately after pack selection, without host distribution', async () => {
@@ -59,6 +60,56 @@ test('host-controlled character picking and line mode respect visibility and per
   await store.mutate(() => store.configure({ ...store.data.options, gameMode: 'character' }));
   assert.deepEqual(store.queue(player.id).assignedCharacters, []);
   assert.equal(view('assignment', { rolesLocked: true }).canPick, false);
+});
+
+
+test('Start Recording opens assigned player recording screen even if READY was never pressed', async () => {
+  const store = new SessionStore({ packs: [pack], dataDir: '/unused' });
+  await store.mutate(() => store.createParty());
+  const player = await store.mutate(() => store.join({
+    roomId: store.data.id, joinToken: store.data.joinToken, nickname: 'Tester',
+  }));
+  await store.mutate(() => store.select(pack.id, store.data.id));
+  await store.mutate(() => store.openLobby());
+  for (const character of pack.characters) await store.mutate(() => store.assign(character, player.id));
+  const before = store.snapshot({ kind: 'player', playerId: player.id });
+  assert.equal(before.session.state, 'assignment');
+  assert.equal(before.session.players[0].ready, false);
+  assert.equal(view(before.session.state, { hasTasks: true }).showRoles, true);
+  await store.mutate(() => store.startRecording());
+  const after = store.snapshot({ kind: 'player', playerId: player.id });
+  assert.ok(after.revision > before.revision, 'host transition is broadcast with a newer revision');
+  assert.equal(after.session.state, 'recording');
+  assert.equal(after.session.rolesLocked, true);
+  assert.equal(after.session.players[0].ready, false, 'server does not force the READY flag');
+  assert.equal(after.queue.lines.length, 2);
+  for (const prepared of [false, true]) {
+    const screen = view(after.session.state, {
+      hasTasks: after.queue.lines.length > 0, rolesLocked: true,
+      prepared, incomplete: true,
+    });
+    assert.equal(screen.showRoles, false, 'role screen must not remain visible');
+    assert.equal(screen.needsReady, false);
+    assert.equal(canRecordSelectedLine({
+      state: after.session.state, hasTasks: true,
+      lineId: after.queue.pendingLines[0], prepared,
+      hasUnfinishedRequiredLine: true,
+    }), true, 'player may click RECORD or SOUNDPAD before granting microphone access');
+  }
+  await store.mutate(() => store.reopenRoles());
+  assert.equal(view(store.data.state, { hasTasks: true }).showRoles, true, 'reopening assignments returns to character screen');
+});
+
+test('role screen never overrides an active recording phase in character or line mode', () => {
+  for (const lineMode of [false, true]) {
+    for (const state of ['recording', 'paused', 'review']) {
+      const screen = view(state, { lineMode, hasTasks: true, rolesLocked: true,
+        prepared: false, incomplete: true });
+      assert.equal(screen.showRoles, false, `${state} should not show role selection`);
+    }
+  }
+  assert.equal(view('recording', { hasTasks: false }).showRoles, false,
+    'unassigned player must wait for host, not see READY');
 });
 
 test('admin moves with the phase while preserving manual navigation within a phase', () => {
