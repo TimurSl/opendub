@@ -13,7 +13,7 @@ import { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack } from "./
 import { SessionStore, fail, randomId } from "./session/store.js";
 import { parseCustomAudioArgs, runCustomAudio } from "./custom-audio.js";
 import { soundpadFormat, checkSoundpadFile, runSoundpadAudio } from "./soundpad-audio.js";
-import { downloadWorkshopItem, workshopItemId } from "./workshop/downloader.js";
+import { downloadWorkshopItem, workshopItemId, workshopAppId, steamUsername, DUB_TOGETHER_APP_ID } from "./workshop/downloader.js";
 import { secureEquals, initializeAdminToken, readAdminToken, tokenFile, parseWireGuardCidrs, wireGuardAddressAllowed } from "./admin-auth.js";
 export { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack, SessionStore };
 
@@ -211,6 +211,8 @@ export async function createRuntime(options = {}) {
   let activeCustomAudioJobs = 0;
   const steamcmdPath = options.steamcmdPath ?? process.env.STEAMCMD_PATH ?? '';
   const steamcmdDir = path.resolve(options.steamcmdDir ?? process.env.STEAMCMD_DIR ?? path.join(dataDir, 'steamcmd'));
+  const steamcmdAppId = workshopAppId(options.workshopAppId ?? process.env.WORKSHOP_APP_ID ?? DUB_TOGETHER_APP_ID);
+  const steamcmdUsername = steamUsername(options.steamcmdUsername ?? process.env.STEAMCMD_USERNAME ?? 'anonymous');
   let workshopJob = null;
   if (transcodeVideo && store.pack) await transcode(store.pack, dataDir, ffmpegPath);
   const app = express();
@@ -263,7 +265,7 @@ export async function createRuntime(options = {}) {
     res.json({ packs: discovered.packs.map(pack => ({ id: pack.id, metadata: pack.metadata, characters: pack.characters, characterLineCounts: pack.characterLineCounts, lineCount: pack.lines.length, characterCount: pack.characters.length, iconUrl: pack.icon ? `/api/admin/packs/${encodeURIComponent(pack.id)}/icon` : null })), errors: discovered.errors });
   });
   app.get('/api/admin/workshop/status', authenticated('admin'), (req, res) => {
-    res.json({ enabled: !!steamcmdPath, job: workshopJob });
+    res.json({ enabled: !!steamcmdPath, appId: steamcmdAppId, job: workshopJob });
   });
   app.post('/api/admin/workshop/download', authenticated('admin'), (req, res) => {
     const { item } = validateBody(req, { item: 'string' });
@@ -275,7 +277,7 @@ export async function createRuntime(options = {}) {
     // Async job: reverse proxy/browser request timeouts cannot interrupt the download.
     void (async () => {
       try {
-        const result = await downloadWorkshopItem({ itemId: id, steamcmdPath, steamcmdDir, workshopDir, username: options.steamcmdUsername ?? process.env.STEAMCMD_USERNAME ?? 'anonymous',
+        const result = await downloadWorkshopItem({ itemId: id, steamcmdPath, steamcmdDir, workshopDir, username: steamcmdUsername, appId: steamcmdAppId,
           beforePublish: target => { if (store.pack?.directory === target) fail('Cannot update the pack while it is selected in an active match', 409); } });
         const refreshed = await discoverPacks(workshopDir);
         discovered.packs = refreshed.packs;

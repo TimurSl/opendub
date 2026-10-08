@@ -16,6 +16,8 @@ buildNpmPackage {
       --add-flags "$out/lib/opendub/server/index.js"
     makeWrapper ${nodejs_22}/bin/node "$out/bin/opendub-auth" \
       --add-flags "$out/lib/opendub/bin/opendub-auth"
+    makeWrapper ${nodejs_22}/bin/node "$out/bin/opendub-steam" \
+      --add-flags "$out/lib/opendub/bin/opendub-steam"
     runHook postInstall
   '';
 }

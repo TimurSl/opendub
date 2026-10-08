@@ -1,9 +1,24 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { parseWorkshopPack } from './parser.js';
 
 export const DUB_TOGETHER_APP_ID = '5020310';
+
+export function workshopAppId(value = DUB_TOGETHER_APP_ID) {
+  const id = String(value);
+  if (!/^[1-9][0-9]{0,9}$/.test(id) || Number(id) > 0xFFFFFFFF)
+    throw new Error('WORKSHOP_APP_ID must be a positive numeric Steam app ID');
+  return id;
+}
+
+export function steamUsername(value = 'anonymous') {
+  if (typeof value !== 'string' || !/^(?:anonymous|[A-Za-z0-9_.-]{3,64})$/.test(value))
+    throw new Error('STEAMCMD_USERNAME must be a Steam login name (never a password)');
+  return value;
+}
+
 export function workshopItemId(value) {
   if (typeof value !== 'string' || value.length > 300) throw new Error('Enter a Workshop item ID or Steam Workshop URL');
   const trimmed = value.trim();
@@ -12,21 +27,45 @@ export function workshopItemId(value) {
   try { url = new URL(trimmed); } catch { throw new Error('Invalid Workshop URL or ID'); }
   if (url.protocol !== 'https:' || !['steamcommunity.com', 'www.steamcommunity.com'].includes(url.hostname) ||
     !['/sharedfiles/filedetails/', '/sharedfiles/filedetails', '/workshop/filedetails/', '/workshop/filedetails'].includes(url.pathname) ||
-    !/^[1-9][0-9]{5,19}$/.test(url.searchParams.get('id') ?? '')) throw new Error('Only Dub Together Workshop item links or numeric IDs are supported');
+    !/^[1-9][0-9]{5,19}$/.test(url.searchParams.get('id') ?? '')) throw new Error('Only Steam Workshop item links or numeric IDs are supported');
   return url.searchParams.get('id');
 }
 
-function runSteamcmd(executable, args, { timeoutMs = 300000, spawnProcess = spawn } = {}) {
+// Never expose SteamCMD's interactive login to a web request. A Steam account
+// must be authorized in advance with `sudo -u opendub -H opendub-steam login ...`.
+// SteamCMD sometimes returns status 0 even when workshop_download_item fails.
+export function runSteamcmd(executable, args, { timeoutMs = 300000, spawnProcess = spawn, cwd, homeDir } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawnProcess(executable, args, { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, HOME: process.env.HOME || '/tmp' } });
-    let log = '';
-    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('SteamCMD timed out')); }, timeoutMs);
-    child.stderr?.on('data', data => { log = (log + data.toString()).slice(-3000); });
-    child.on('error', error => { clearTimeout(timer); reject(new Error('SteamCMD could not start: ' + error.message)); });
-    child.on('exit', code => {
+    const child = spawnProcess(executable, args, {
+      stdio: ['ignore', 'pipe', 'pipe'], cwd,
+      env: { ...process.env, HOME: homeDir ?? process.env.HOME ?? os.homedir(),
+        XDG_DATA_HOME: path.join(homeDir ?? process.env.HOME ?? os.homedir(), '.local', 'share') },
+    });
+    let output = '';
+    let settled = false;
+    const finish = error => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      if (code !== 0) reject(new Error('SteamCMD exited with ' + code + ': ' + log.slice(-1000)));
-      else resolve();
+      if (error) reject(error); else resolve();
+    };
+    const collect = data => { output = (output + data.toString()).slice(-8192); };
+    child.stdout?.on('data', collect);
+    child.stderr?.on('data', collect);
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(new Error('SteamCMD timed out; check connectivity or reauthenticate interactively using opendub-steam'));
+    }, timeoutMs);
+    child.on('error', error => finish(new Error('SteamCMD could not start: ' + error.message)));
+    child.on('close', code => {
+      if (/No subscription/i.test(output))
+        return finish(new Error('Steam account has no Workshop access for this game (No subscription)'));
+      if (/Login Failure|Invalid Password|Steam Guard|two-factor|not logged on/i.test(output))
+        return finish(new Error('SteamCMD authentication required: run opendub-steam login as the opendub user'));
+      if (/ERROR!\s*(?:Download item|Failed to download|Failed to install)/i.test(output))
+        return finish(new Error('SteamCMD failed to download this Workshop item; check its availability and SteamCMD logs'));
+      if (code !== 0) return finish(new Error(`SteamCMD exited with status ${code}; check SteamCMD logs and reauthenticate if necessary`));
+      finish();
     });
   });
 }
@@ -48,30 +87,41 @@ async function checkTree(root) {
   await visit(root);
 }
 
-export async function downloadWorkshopItem({ itemId, steamcmdPath = 'steamcmd', steamcmdDir, workshopDir, run = runSteamcmd, username = 'anonymous', beforePublish = () => {} }) {
+export async function downloadWorkshopItem({
+  itemId, steamcmdPath = 'steamcmd', steamcmdDir, workshopDir,
+  appId = DUB_TOGETHER_APP_ID, username = 'anonymous',
+  homeDir = process.env.HOME ?? os.homedir(),
+  run = runSteamcmd, beforePublish = () => {},
+}) {
   const id = workshopItemId(itemId);
-  if (!/^(?:anonymous|[A-Za-z0-9_.-]{3,64})$/.test(username)) throw new Error('Invalid SteamCMD username');
+  const gameAppId = workshopAppId(appId);
+  const account = steamUsername(username);
   const steamRoot = path.resolve(steamcmdDir);
   const packs = path.resolve(workshopDir);
   await fs.mkdir(steamRoot, { recursive: true, mode: 0o700 });
   await fs.mkdir(packs, { recursive: true, mode: 0o700 });
-  // A Steam account is NOT supplied via the API. Some games reject anonymous
-  // downloads; use a locally authenticated SteamCMD installation if required.
-  await run(steamcmdPath, ['+force_install_dir', steamRoot, '+login', username, '+workshop_download_item', DUB_TOGETHER_APP_ID, id, '+quit']);
-  const home = process.env.HOME ?? '';
+  // SteamCMD is noninteractive inside the service. The password and Steam Guard
+  // code are NEVER supplied as process arguments, from HTTP or from Nix config.
+  await run(steamcmdPath, [
+    '+@NoPromptForPassword', '1', '+@ShutdownOnFailedCommand', '1',
+    '+force_install_dir', steamRoot, '+login', account,
+    '+workshop_download_item', gameAppId, id, '+quit',
+  ], { cwd: steamRoot, homeDir });
+
+  // On some SteamCMD builds Workshop files ignore force_install_dir and land
+  // under the launch directory or Steam's persistent data directory instead.
   const candidates = [
-    path.join(steamRoot, 'steamapps', 'workshop', 'content', DUB_TOGETHER_APP_ID, id),
-    path.join(steamRoot, 'steamapps', 'workshop', 'content', id),
-    ...(home ? [
-      path.join(home, '.local', 'share', 'Steam', 'steamcmd', 'steamapps', 'workshop', 'content', DUB_TOGETHER_APP_ID, id),
-      path.join(home, '.steam', 'steamcmd', 'steamapps', 'workshop', 'content', DUB_TOGETHER_APP_ID, id),
-    ] : []),
+    path.join(steamRoot, 'steamapps', 'workshop', 'content', gameAppId, id),
+    path.join(homeDir, '.local', 'share', 'Steam', 'steamcmd', 'steamapps', 'workshop', 'content', gameAppId, id),
+    path.join(homeDir, '.steam', 'steamcmd', 'steamapps', 'workshop', 'content', gameAppId, id),
+    path.join(homeDir, 'Steam', 'steamapps', 'workshop', 'content', gameAppId, id),
+    path.join(homeDir, '.local', 'share', 'Steam', 'steamapps', 'workshop', 'content', gameAppId, id),
   ];
   let source;
   for (const candidate of candidates) {
-    try { if ((await fs.stat(candidate)).isDirectory()) { source = candidate; break; } } catch {}
+    try { if ((await fs.lstat(candidate)).isDirectory()) { source = candidate; break; } } catch {}
   }
-  if (!source) throw new Error('SteamCMD finished, but pack files were not found. Check SteamCMD logs and anonymous Workshop access.');
+  if (!source) throw new Error(`SteamCMD did not provide Workshop item ${id} for app ${gameAppId}; check Steam account, Workshop access and logs`);
   await checkTree(source);
   const target = path.join(packs, `workshop-${id}`);
   // Parse BEFORE publishing the pack to avoid exposing incomplete/malformed media.

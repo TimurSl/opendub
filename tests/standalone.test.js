@@ -4,8 +4,10 @@ import { mkdtemp, readFile, mkdir, rm, writeFile, readdir } from 'node:fs/promis
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { initializeAdminToken, readAdminToken, rotateAdminToken, parseWireGuardCidrs, wireGuardAddressAllowed, secureEquals } from '../server/admin-auth.js';
-import { downloadWorkshopItem, workshopItemId } from '../server/workshop/downloader.js';
+import { downloadWorkshopItem, workshopItemId, workshopAppId, steamUsername, runSteamcmd } from '../server/workshop/downloader.js';
 const root = async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'opendub-standalone-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -58,7 +60,7 @@ test('Workshop download runs fixed SteamCMD arguments, validates and publishes a
     await writePack(path.join(steamcmdDir, 'steamapps/workshop/content/5020310/1234567890'));
   } });
   assert.equal(argsSeen[0], 'steamcmd');
-  assert.deepEqual(argsSeen.slice(1), ['+force_install_dir', steamcmdDir, '+login', 'anonymous', '+workshop_download_item', '5020310', '1234567890', '+quit']);
+  assert.deepEqual(argsSeen.slice(1), ['+@NoPromptForPassword', '1', '+@ShutdownOnFailedCommand', '1', '+force_install_dir', steamcmdDir, '+login', 'anonymous', '+workshop_download_item', '5020310', '1234567890', '+quit']);
   assert.equal(downloaded.id, '1234567890');
   assert.equal(downloaded.pack.metadata.title, 'Test');
   assert.equal((await readdir(workshopDir)).length, 1);
@@ -77,4 +79,84 @@ test('Malformed Workshop packs and refused publish leave old packs intact', asyn
   await rm(source, { recursive: true }); await writePack(source);
   await assert.rejects(downloadWorkshopItem({ ...opts, beforePublish: () => { throw new Error('Selected pack'); } }), /Selected pack/);
   assert.equal((await readdir(workshopDir)).length, 1);
+});
+
+
+test('Steam app ID and login name are strict, numeric/fixed SteamCMD arguments', async t => {
+  const dir = await root(t);
+  const steamcmdDir = path.join(dir, 'steam-cache');
+  const workshopDir = path.join(dir, 'packs-imported');
+  const homeDir = path.join(dir, 'home');
+  const invoked = [];
+  const result = await downloadWorkshopItem({
+    itemId: '1234567890', steamcmdDir, workshopDir, homeDir, appId: '480', username: 'owned_account',
+    run: async (binary, args, opts) => {
+      invoked.push({ binary, args, opts });
+      await writePack(path.join(steamcmdDir, 'steamapps/workshop/content/480/1234567890'));
+    },
+  });
+  assert.equal(result.pack.metadata.title, 'Test');
+  assert.deepEqual(invoked[0].opts, { cwd: steamcmdDir, homeDir });
+  assert.deepEqual(invoked[0].args.slice(-6), ['+login', 'owned_account', '+workshop_download_item', '480', '1234567890', '+quit']);
+  assert.equal(await readFile(path.join(workshopDir, 'workshop-1234567890/_pack_info.ini'), 'utf8').then(x => x.includes('Test')), true);
+  for (const bad of ['0', '01', '-1', '+quit', '480 +quit', '4294967296', '1e3', ''])
+    assert.throws(() => workshopAppId(bad), /app ID/);
+  assert.equal(workshopAppId(5020310), '5020310');
+  for (const bad of ['a +quit', 'bad\nlogin', '--', 'x', ''])
+    assert.throws(() => steamUsername(bad), /login name/);
+});
+
+function fakeSteamcmd(output, exitCode = 0) {
+  return (_exe, _args, _options) => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => {};
+    queueMicrotask(() => {
+      child.stdout.write(output);
+      child.stdout.end();
+      child.stderr.end();
+      child.emit('close', exitCode);
+    });
+    return child;
+  };
+}
+
+test('SteamCMD fails closed for login errors and Workshop errors even with exit code 0', async () => {
+  const opts = { timeoutMs: 1000 };
+  await assert.rejects(runSteamcmd('steamcmd', [], { ...opts, spawnProcess: fakeSteamcmd('ERROR! Download item 123 failed (No Connection).') }), /failed to download/);
+  await assert.rejects(runSteamcmd('steamcmd', [], { ...opts, spawnProcess: fakeSteamcmd('ERROR! Download item 123 failed (No subscription).') }), /No subscription/);
+  await assert.rejects(runSteamcmd('steamcmd', [], { ...opts, spawnProcess: fakeSteamcmd('Login Failure: Steam Guard') }), /opendub-steam login/);
+  await assert.rejects(runSteamcmd('steamcmd', [], { ...opts, spawnProcess: fakeSteamcmd('ok', 7) }), /status 7/);
+  await runSteamcmd('steamcmd', [], { ...opts, spawnProcess: fakeSteamcmd('Success. Downloaded item') });
+});
+
+test('opendub-steam logs in with the same HOME and working directory, without password CLI arguments', async t => {
+  const home = await root(t);
+  const steamcmdDir = path.join(home, 'my-steam');
+  const output = path.join(home, 'called.json');
+  const fake = path.join(home, 'steamcmd-fake');
+  await writeFile(fake, `#!/usr/bin/env node
+import fs from 'node:fs';
+fs.writeFileSync(process.env.TEST_STEAM_OUT, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), home: process.env.HOME, xdg: process.env.XDG_DATA_HOME }));
+`, { mode: 0o700 });
+  execFileSync(process.execPath, [new URL('../bin/opendub-steam', import.meta.url).pathname, 'login', 'owned_account'], {
+    env: { ...process.env, HOME: home, STEAMCMD_DIR: steamcmdDir, STEAMCMD_PATH: fake, TEST_STEAM_OUT: output },
+    cwd: home,
+  });
+  const called = JSON.parse(await readFile(output, 'utf8'));
+  assert.deepEqual(called.args, ['+force_install_dir', steamcmdDir, '+login', 'owned_account', '+quit']);
+  assert.equal(called.cwd, steamcmdDir);
+  assert.equal(called.home, home);
+  assert.equal(called.xdg, path.join(home, '.local', 'share'));
+  const extra = path.join(home, 'other-steam');
+  execFileSync(process.execPath, [new URL('../bin/opendub-steam', import.meta.url).pathname, 'login', 'owned_account', '--steamcmd-dir', extra], {
+    env: { ...process.env, HOME: home, STEAMCMD_DIR: steamcmdDir, STEAMCMD_PATH: fake, TEST_STEAM_OUT: output },
+  });
+  const override = JSON.parse(await readFile(output, 'utf8'));
+  assert.equal(override.cwd, extra);
+  assert.equal(override.args[1], extra);
+  assert.throws(() => execFileSync(process.execPath, [new URL('../bin/opendub-steam', import.meta.url).pathname, 'login', 'x;quit'], {
+    env: { ...process.env, HOME: home, STEAMCMD_DIR: steamcmdDir, STEAMCMD_PATH: fake }, stdio: 'pipe',
+  }), /Command failed/);
 });

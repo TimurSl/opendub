@@ -19,8 +19,20 @@ in {
       description = "Private WireGuard IPv4 networks permitted to use admin without a token. Requires Nginx to overwrite X-Real-IP.";
     };
     steamcmdUsername = mkOption {
-      type = types.str; default = "anonymous";
-      description = "Public Steam account name for pre-authenticated SteamCMD downloads (no passwords); authenticate interactively as the opendub service user.";
+      type = types.str; default = "anonymous"; example = "my_steam_login";
+      description = "Steam login name, not a password. Authorize interactively as user opendub via opendub-steam login.";
+    };
+    workshopAppId = mkOption {
+      type = types.int; default = 5020310;
+      description = "Steam game App ID used for workshop_download_item. The default is Dub Together.";
+    };
+    workshopDir = mkOption {
+      type = types.str; default = "${state}/packs";
+      description = "Directory containing imported/validated Open Dub packs; must be writable by opendub.";
+    };
+    steamcmdDir = mkOption {
+      type = types.str; default = "${state}/steamcmd";
+      description = "Persistent SteamCMD working/download directory, shared with opendub-steam login.";
     };
     workshopDownloader = mkOption {
       type = types.bool; default = false;
@@ -35,6 +47,12 @@ in {
       home = state;
       description = "Open Dub dedicated runtime";
     };
+    # Extra paths outside StateDirectory are explicitly created for the
+    # unprivileged service account, not at runtime as root.
+    systemd.tmpfiles.rules = [
+      "d ${cfg.workshopDir} 0700 opendub opendub -"
+      "d ${cfg.steamcmdDir} 0700 opendub opendub -"
+    ];
     systemd.services.opendub = {
       description = "Open Dub standalone dubbing runtime";
       wantedBy = [ "multi-user.target" ];
@@ -45,8 +63,9 @@ in {
         HOST = "127.0.0.1";
         DATA_DIR = state;
         HOME = state;
-        WORKSHOP_DIR = "${state}/packs";
-        STEAMCMD_DIR = "${state}/steamcmd";
+        WORKSHOP_DIR = cfg.workshopDir;
+        STEAMCMD_DIR = cfg.steamcmdDir;
+        WORKSHOP_APP_ID = toString cfg.workshopAppId;
         FFMPEG_PATH = "${pkgs.ffmpeg}/bin/ffmpeg";
         TRANSCODE_VIDEO = "1";
         STEAMCMD_USERNAME = cfg.steamcmdUsername;
@@ -61,7 +80,6 @@ in {
         StateDirectory = "opendub";
         StateDirectoryMode = "0700";
         WorkingDirectory = state;
-        ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${state}/packs";
         ExecStart = "${lib.getExe cfg.package}";
         Restart = "on-failure";
         RestartSec = 3;
@@ -74,7 +92,7 @@ in {
         ProtectControlGroups = true;
         ProtectKernelModules = true;
         RestrictSUIDSGID = true;
-        ReadWritePaths = [ state ];
+        ReadWritePaths = lib.unique [ state cfg.workshopDir cfg.steamcmdDir ];
       };
     };
     services.nginx = mkIf cfg.nginx {
@@ -101,6 +119,12 @@ in {
       };
     };
     assertions = [ {
+      assertion = cfg.workshopAppId > 0 && cfg.workshopAppId <= 4294967295;
+      message = "services.opendub.workshopAppId must be a positive 32-bit Steam app ID";
+    } {
+      assertion = builtins.all (dir: lib.hasPrefix "/" dir && !(lib.hasInfix ".." dir)) [ cfg.workshopDir cfg.steamcmdDir ];
+      message = "services.opendub.workshopDir and steamcmdDir must be absolute paths without '..'";
+    } {
       assertion = cfg.domain != "" && !(lib.hasInfix "/" cfg.domain) && !(lib.hasInfix ":" cfg.domain);
       message = "services.opendub.domain must be a hostname, without scheme/path/port";
     } ];

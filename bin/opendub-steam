@@ -1,0 +1,33 @@
+#!/usr/bin/env node
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { spawn } from 'node:child_process';
+import { steamUsername } from '../server/workshop/downloader.js';
+
+function usage() {
+  console.log('Usage: opendub-steam login STEAM_LOGIN_NAME [--steamcmd-dir ABSOLUTE_PATH]\n\nRun as the opendub service user, e.g. sudo -u opendub -H opendub-steam login myaccount.\nPassword and Steam Guard are entered interactively into SteamCMD, never stored in Nix config.\nUses HOME and STEAMCMD_DIR (defaults to $HOME/steamcmd) matching the Open Dub service.');
+}
+
+const [command, username, ...other] = process.argv.slice(2);
+if (['-h', '--help'].includes(command)) { usage(); process.exit(0); }
+if (command !== 'login' || !username || (other.length && (other.length !== 2 || other[0] !== '--steamcmd-dir' || !path.isAbsolute(other[1])))) {
+  usage(); process.exit(2);
+}
+
+try {
+  steamUsername(username);
+  if (username === 'anonymous') throw new Error('Use a real Steam login name for interactive authentication');
+  const homeDir = process.env.HOME ?? os.homedir();
+  const steamcmdDir = path.resolve(other.length ? other[1] : process.env.STEAMCMD_DIR ?? path.join(homeDir, 'steamcmd'));
+  const executable = process.env.STEAMCMD_PATH || 'steamcmd';
+  await mkdir(steamcmdDir, { recursive: true, mode: 0o700 });
+  const child = spawn(executable, [
+    '+force_install_dir', steamcmdDir, '+login', username, '+quit',
+  ], { cwd: steamcmdDir, env: { ...process.env, HOME: homeDir, XDG_DATA_HOME: path.join(homeDir, '.local', 'share') }, stdio: 'inherit' });
+  child.on('error', error => { console.error('opendub-steam:', error.message); process.exitCode = 1; });
+  child.on('close', code => {
+    if (code !== 0) console.error(`opendub-steam: SteamCMD exited with ${code}`);
+    process.exitCode = code === 0 ? 0 : 1;
+  });
+} catch (error) { console.error('opendub-steam:', error.message); process.exitCode = 2; }

@@ -15,6 +15,7 @@
       apps = forAllSystems (pkgs: {
         default = { type = "app"; program = "${self.packages.${pkgs.system}.default}/bin/opendub"; };
         auth = { type = "app"; program = "${self.packages.${pkgs.system}.default}/bin/opendub-auth"; };
+        steam = { type = "app"; program = "${self.packages.${pkgs.system}.default}/bin/opendub-steam"; };
       });
       nixosModules.default = import ./nix/module.nix;
       nixosModules.opendub = self.nixosModules.default;

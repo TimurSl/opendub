@@ -37,7 +37,10 @@ Integrate the `opendub-online` input and module into your **existing** inputs/ou
     enable = true;
     domain = "dub.example.org"; # DNS A/AAAA record -> VPS
     workshopDownloader = true;
-    steamcmdUsername = "anonymous";
+    steamcmdUsername = "MY_STEAM_LOGIN"; # login name only; no password or 2FA in Nix
+    workshopAppId = 5020310;         # Dub Together's Steam app ID
+    workshopDir = "/var/lib/opendub/packs";        # validated/imported packs
+    steamcmdDir = "/var/lib/opendub/steamcmd";      # SteamCMD downloads/cache
     wireGuardAdminCidrs = [ "10.77.0.0/24" ]; # optional; omit for token-only admin
   };
 
@@ -71,16 +74,29 @@ Visit `https://dub.example.org/admin`. From the public internet the login form r
 
 ## 4. Workshop downloader
 
-Open the admin studio, create a party (or download before one) and paste a Dub Together Steam Workshop URL or numeric item ID. The application accepts only numeric IDs and the canonical Steam Community item URL, **not arbitrary URLs**. App ID is `5020310`. SteamCMD runs server-side without a shell; downloaded files are parsed before installation. Completed packs show up without restarting the server. Workshop data remains under `/var/lib/opendub/packs`.
+Open the admin studio, create a party (or download before one) and paste a Steam Workshop URL or numeric item ID. The server allows only numeric IDs and canonical Steam Community Workshop links, **not arbitrary URLs**. The configured `workshopAppId` selects the owning game for `workshop_download_item`. For Dub Together the Steam App ID is **5020310** ([Steam store](https://store.steampowered.com/app/5020310/Dub_Together/)). Workshop item IDs are a **different** number taken from the Workshop link.
 
-SteamCMD anonymous access is controlled by the game's Workshop settings and **may fail with `No subscription`**. If necessary, use an account legally authorized to download the Workshop content. Authenticate **interactively**, without storing passwords in configuration or using the web admin interface:
+Authenticated SteamCMD is supported. SteamCMD may require an account that owns the game or otherwise has access to the item. Authenticate **once interactively on the VPS as the service user**. No login details are ever submitted through the admin UI or saved in Nix, environment variables or command arguments:
 
 ```sh
-# With a suitable interactive TTY (for example sudo -iu opendub if the account allows shell):
-sudo -u opendub -H steamcmd +login YOUR_STEAM_USERNAME +quit
+# First deploy with workshopDownloader = true so the opendub user and steamcmd exist.
+sudo nixos-rebuild switch --flake /var/nixos-config#pussy
+
+# The login name MUST match services.opendub.steamcmdUsername.
+sudo -u opendub -H opendub-steam login MY_STEAM_LOGIN
+# Enter password / Steam Guard only into the interactive SteamCMD prompt.
 ```
 
-Then set `services.opendub.steamcmdUsername = "YOUR_STEAM_USERNAME";` and rebuild. SteamCMD must reuse cached authorization for that exact service user. You may need to complete Steam Guard interactively. Some games/items cannot be downloaded headlessly even with an account. Respect Workshop authors' rights; do not redistribute packs or copyrighted videos without permission.
+The `opendub-steam` command starts SteamCMD with the **same** HOME (`/var/lib/opendub`) and persistent working directory (`/var/lib/opendub/steamcmd`) that the service uses; it needs an interactive terminal and does not take a password or Steam Guard code as arguments. If you set a nondefault `services.opendub.steamcmdDir`, pass `--steamcmd-dir /YOUR/ABSOLUTE/PATH` to the login command so it shares the service's working directory. `sudo -iu opendub` is **not necessary**, and can fail for a system account with a non-login shell. Re-run the command when Steam expires its session or asks for another Steam Guard confirmation. Keep `/var/lib/opendub` mode 0700, since Steam stores account credentials there. Steam may invalidate or challenge a SteamCMD session if the same account is used concurrently on another device.
+
+The NixOS configuration separates two locations:
+
+- `steamcmdDir`: SteamCMD's working/download directory; under it (or Steam's persistent data path) are the raw `steamapps/workshop/content/<AppID>/<ItemID>` files and manifests.
+- `workshopDir`: the destination containing **validated**, locally imported pack directories, which the application displays in its admin UI. This directory may be an absolute path such as `/srv/opendub/packs`; it does **not** need to be the raw Steam Workshop cache.
+
+You can customize both in `services.opendub` and their directories are created with permissions for the `opendub` user. Keep them outside `/home` because the service enables systemd `ProtectHome`. Avoid changing `steamcmdDir` or `opendub`'s HOME after signing in: authentication and downloaded files will no longer be in the expected location. For a non-NixOS deployment, set `STEAMCMD_USERNAME`, `WORKSHOP_APP_ID`, `STEAMCMD_DIR`, and `WORKSHOP_DIR` alongside `HOME` (and `STEAMCMD_PATH`).
+
+The server launches SteamCMD non-interactively without a shell or password and explicitly suppresses password prompts. If authentication expires, downloads fail with an error asking the operator to log in on the VPS; no Steam auth prompts are exposed to remote players. Downloads are parsed and staged before replacing a working pack, and completed packs show up without restarting the server. SteamCMD sometimes returns exit status 0 after a Workshop error, so the downloader also checks its output for failure messages. Downloading a pack with a purchased account does **not** automatically grant redistribution or public hosting rights to third-party media; check the Workshop item license and author permissions.
 
 ### Manual packs / recovery
 
@@ -121,7 +137,7 @@ For an initial deployment, manually run `sudo nixos-rebuild switch --flake /var/
 - `401 Admin authorization required`: wrong/revoked token or browser cookie missing. Run `opendub-auth` and log in again.
 - `403 Origin does not match runtime`: check `https://` Nginx forwarding and unchanged `Host`, and never forward untrusted `X-Forwarded-Proto`.
 - Microphone permission blocked: use real HTTPS with a trusted certificate; HTTP LAN/WG URLs alone do not qualify.
-- `SteamCMD finished, but pack files were not found`: inspect `journalctl -u opendub` / SteamCMD account and Workshop eligibility. The downloader never accepts arbitrary SteamCMD arguments.
+- `SteamCMD did not provide Workshop item` or `SteamCMD authentication required`: re-run `sudo -u opendub -H opendub-steam login MY_STEAM_LOGIN`; inspect `journalctl -u opendub`, SteamCMD logs and item eligibility. The downloader never accepts arbitrary SteamCMD arguments.
 - Port 7373 should listen only on `127.0.0.1`; firewall expose 80/443, not the Node service.
 - Plan VPS disk for Workshop video, conversion cache, uploads and exports. `ffmpeg` transcodes user-supplied media and should remain sandboxed as an unprivileged service. Back up `/var/lib/opendub/packs` and completed exports externally if desired.
 
