@@ -9,13 +9,14 @@ const newRetakeAttemptId = () => globalThis.crypto?.randomUUID?.() || `${Date.no
 
 const VOICE_EFFECTS = [
   ['normal', 'Normal'], ['echo', 'Echo'], ['phone', 'Phone'], ['robot', 'Robot'],
-  ['autoTune', 'AUTO-TUNE'],
-  ['goblin', 'Goblin'], ['demon', 'Demon'], ['radio', 'Radio'], ['walkieTalkie', 'Walkie-Talkie'],
-  ['chipmunk', 'Chipmunk'], ['giant', 'Giant'], ['drunk', 'Drunk'], ['brokenRobot', 'Broken Robot'],
-  ['vhs', 'VHS'], ['cave', 'Cave'], ['telephone', 'Telephone'], ['megaphone', 'Megaphone'],
-  ['helium', 'Helium'], ['cursed', 'Cursed'], ['cloneArmy', 'Clone Army'], ['badInternet', 'Bad Internet'],
-  ['nokia', 'Nokia'], ['bossFight', 'Boss Fight'], ['ghost', 'Ghost'], ['alien', 'Alien'], ['reverseDemon', 'Reverse Demon']
+  ['autoTune', 'AUTO-TUNE'], ['goblin', 'Goblin'], ['demon', 'Demon'],
+  ['chipmunk', 'Chipmunk'], ['giant', 'Giant'], ['walkieTalkie', 'Walkie-Talkie'],
+  ['megaphone', 'Megaphone'], ['cave', 'Cave'], ['badInternet', 'Bad Internet']
 ];
+
+// These effects need sample-level DSP, not just a Web Audio filter.
+const WORKLET_EFFECTS = new Set(['autoTune', 'goblin', 'demon', 'chipmunk', 'giant', 'walkieTalkie', 'badInternet']);
+const WORKLET_UNAVAILABLE = 'Pitch and glitch voice effects require AudioWorklet, which is unavailable in this browser.';
 
 const EFFECT_ICON_PATHS = {
   normal: '<path d="M3 12h2l2-5 4 10 4-10 3 5h3"/>',
@@ -24,25 +25,12 @@ const EFFECT_ICON_PATHS = {
   robot: '<rect x="5" y="6" width="14" height="13" rx="2"/><path d="M12 3v3M8 11h1m6 0h1M9 15h6M3 10v5m18-5v5"/>',
   goblin: '<path d="m4 7 5 2 3-3 3 3 5-2-2 11H6L4 7Z"/><path d="m8 13 2 1m6-1-2 1m-2 1v2"/>',
   demon: '<path d="M5 8 3 3l7 3h4l7-3-2 5 1 6-4 6H8l-4-6 1-6Z"/><path d="m8 12 2 1m6-1-2 1m-2 1v2"/>',
-  radio: '<rect x="3" y="8" width="18" height="12" rx="2"/><path d="m7 8 9-5M6 12h7m-7 3h4m5 1h2"/><circle cx="17" cy="13" r="1"/>',
   walkieTalkie: '<rect x="7" y="6" width="11" height="16" rx="2"/><path d="M11 6V3l6-1M10 10h5m-5 3h5m-3 5h1"/>',
   chipmunk: '<path d="M4 18 9 13l3 3 7-9"/><path d="M13 7h6v6M4 5h5M4 9h3"/>',
   giant: '<path d="M3 12h2l2-3 3 6 3-9 3 12 3-6h2"/><path d="M4 4h16M4 20h16"/>',
-  drunk: '<path d="M3 8c3-5 5 5 8 0s5 5 10 0M3 16c3-5 5 5 8 0s5 5 10 0"/>',
-  brokenRobot: '<path d="M5 6h6v4H7v4h5m2-8h5v4h-4v4h4v4h-6"/><path d="m3 4 2 2m14 12 2 2"/>',
-  vhs: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8" cy="12" r="3"/><circle cx="16" cy="12" r="3"/><path d="M11 12h2M6 8h12M6 16h12"/>',
   cave: '<path d="M3 20V9l4-5 5 3 5-4 4 6v11Z"/><path d="M9 20v-5a3 3 0 0 1 6 0v5M3 20h18"/>',
-  telephone: '<path d="M6 4c-2 1-2 4-1 7 2 5 6 9 11 10 3 1 6 0 7-2l-5-4-3 2-6-6 2-3-5-4Z"/>',
   megaphone: '<path d="m3 10 14-5v14L3 14v-4Z"/><path d="M7 15l2 5h4l-2-4m9-5h2m-2-4 2-2m-2 14 2 2"/>',
-  helium: '<path d="M12 21V4m-6 6 6-6 6 6"/><path d="M4 17h3m10 0h3M8 13h2m4 0h2"/>',
-  cursed: '<path d="M12 3a9 9 0 1 0 9 9 7 7 0 1 1-7-7 5 5 0 1 0 5 5 3 3 0 1 1-3-3"/>',
-  cloneArmy: '<circle cx="12" cy="7" r="2"/><circle cx="6" cy="10" r="2"/><circle cx="18" cy="10" r="2"/><path d="M8 19v-2a4 4 0 0 1 8 0v2m-13 0v-2a3 3 0 0 1 4-3m14 5v-2a3 3 0 0 0-4-3"/>',
   badInternet: '<path d="M3 9a14 14 0 0 1 15-2M6 13a9 9 0 0 1 6-2m3 1 4 4m0-4-4 4M10 18h.01"/>',
-  nokia: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M10 5h4m-4 4h1m2 0h1m-4 3h1m2 0h1m-4 3h1m2 0h1m-2 3h.01"/>',
-  bossFight: '<path d="m12 3 2 3 4-1-1 4 4 3-4 3 1 4-4-1-2 3-2-3-4 1 1-4-4-3 4-3-1-4 4 1 2-3Z"/><path d="m9 12 2 1m4-1-2 1m-2 1v2"/>',
-  ghost: '<path d="M5 20V11a7 7 0 0 1 14 0v9l-3-2-2 2-2-2-2 2-2-2-3 2Z"/><circle cx="9" cy="11" r="1"/><circle cx="15" cy="11" r="1"/>',
-  alien: '<path d="M12 3c-5 0-8 4-8 9 0 5 3 9 8 9s8-4 8-9c0-5-3-9-8-9Z"/><path d="M8 11c1-2 2-2 4 0 2-2 3-2 4 0m-8 4c2 2 6 2 8 0"/>',
-  reverseDemon: '<path d="m12 5-7 7 7 7M20 5l-7 7 7 7"/><path d="m5 7-1-4-3 3m18 11 1 4 3-3"/>',
   autoTune: '<path d="M4 17V7m0 10h3m-3-5h2m-2-5h3m3 10v-6a2 2 0 0 1 4 0v6m-4-3h4m3 3V7m0 10h4"/>'
 };
 
@@ -173,9 +161,9 @@ export class LineRecorder {
     if (this.effects) {
       const enabled = this.settings?.voiceEffectsEnabled !== false;
       for (const button of this.effects.querySelectorAll('[data-effect]')) {
-        const unavailable = button.getAttribute('data-effect') === 'autoTune' && this.effectWorkletAvailable === false;
+        const unavailable = WORKLET_EFFECTS.has(button.getAttribute('data-effect')) && this.effectWorkletAvailable === false;
         button.disabled = !enabled || capturing || accepting || unavailable;
-        button.title = unavailable ? 'AUTO-TUNE requires AudioWorklet processing, which is unavailable in this browser.' : '';
+        button.title = unavailable ? WORKLET_UNAVAILABLE : '';
         button.setAttribute('aria-pressed', String(button.getAttribute('data-effect') === this.currentEffect));
       }
     }
@@ -245,8 +233,8 @@ export class LineRecorder {
   }
   setEffect(effect) {
     if (!VOICE_EFFECTS.some(([id]) => id === effect) || activeCapture(this.mode)) return;
-    if (effect === 'autoTune' && this.effectWorkletAvailable === false) {
-      this.setEffectCapability('AUTO-TUNE requires AudioWorklet processing, which is unavailable in this browser.');
+    if (WORKLET_EFFECTS.has(effect) && this.effectWorkletAvailable === false) {
+      this.setEffectCapability(WORKLET_UNAVAILABLE);
       return;
     }
     this.currentEffect = this.settings?.voiceEffectsEnabled === false ? 'normal' : effect;
@@ -256,15 +244,15 @@ export class LineRecorder {
   async ensureEffectWorklet(context) {
     if (!context?.audioWorklet || typeof AudioWorkletNode !== 'function') {
       this.effectWorkletAvailable = false;
-      this.setEffectCapability('AUTO-TUNE requires AudioWorklet processing, which is unavailable in this browser.');
-      if (this.currentEffect === 'autoTune') this.currentEffect = 'normal';
+      this.setEffectCapability(WORKLET_UNAVAILABLE);
+      if (WORKLET_EFFECTS.has(this.currentEffect)) this.currentEffect = 'normal';
       this.updateControls();
       return false;
     }
     this.effectWorkletPromise ??= context.audioWorklet.addModule(new URL('./effect-processor.js', import.meta.url))
       .then(() => true).catch(() => false);
     this.effectWorkletAvailable = await this.effectWorkletPromise;
-    this.setEffectCapability(this.effectWorkletAvailable ? '' : 'AUTO-TUNE requires AudioWorklet processing, which is unavailable in this browser.');
+    this.setEffectCapability(this.effectWorkletAvailable ? '' : WORKLET_UNAVAILABLE);
     if (!this.effectWorkletAvailable && this.currentEffect === 'autoTune') this.currentEffect = 'normal';
     this.updateControls();
     return this.effectWorkletAvailable;
@@ -355,7 +343,7 @@ export class LineRecorder {
 
     switch (this.currentEffect) {
       case 'echo': addDelay(0.22, 0.24, 0.48, 0.78); break;
-      case 'phone': addBandpass(430, 3200); break;
+      case 'phone': addBandpass(620, 2400); addCompressor(-29, 5); break;
       case 'robot': {
         addFilter('highpass', 120, { q: 0.7 });
         addFilter('peaking', 2400, { q: 1.1, gain: 4 });
@@ -381,44 +369,38 @@ export class LineRecorder {
         break;
       }
       case 'goblin': addFilter('highpass', 180); addFilter('highshelf', 2200, { gain: 2 }); break;
-      case 'demon': addFilter('lowshelf', 140, { gain: 4 }); addDistortion(1.45); break;
-      case 'radio': addBandpass(300, 3500); addCompressor(-27, 4); break;
-      case 'walkieTalkie': addBandpass(500, 2800); addDistortion(1.8); break;
+      case 'demon': addFilter('lowshelf', 150, { gain: 5 }); addFilter('lowpass', 4500); addDistortion(2.1); break;
+      case 'walkieTalkie': addBandpass(500, 2800); addDistortion(2.2); addCompressor(-26, 6); break;
       case 'chipmunk': addFilter('highpass', 100); break;
       case 'giant': addFilter('lowshelf', 130, { gain: 2 }); addChorus(); break;
-      case 'drunk': addFilter('lowpass', 7200); break;
-      case 'brokenRobot': addBandpass(100, 6200); addDistortion(2.3); break;
-      case 'vhs': addFilter('highpass', 55); addFilter('lowpass', 5200); break;
-      case 'cave': addReverb(0.34, 0.2); addDelay(0.16, 0.18, 0.25, 0.9); break;
-      case 'telephone': addBandpass(400, 3000); addDistortion(1.65); break;
+      case 'cave': addReverb(0.65, 0.45); addDelay(0.19, 0.28, 0.38, 0.85); break;
       case 'megaphone': addBandpass(300, 3500); addCompressor(-30, 12); addDistortion(3.2); break;
-      case 'helium': addFilter('highpass', 100); addFilter('highshelf', 2100, { gain: 5 }); break;
-      case 'cursed': addFilter('lowshelf', 150, { gain: 3 }); addDelay(0.075, 0.12, 0.22, 0.9); break;
-      case 'badInternet': addFilter('lowpass', 6500); break;
-      case 'nokia': addBandpass(120, 3800); addCompressor(-28, 10); break;
-      case 'bossFight': addFilter('lowshelf', 95, { gain: 4 }); addCompressor(-25, 8); break;
-      case 'ghost': addBandpass(380, 7200); addChorus(); addReverb(0.3, 0.15); addDelay(0.13, 0.16, 0.22, 0.9); break;
-      case 'alien': addFilter('highpass', 80); addFilter('peaking', 980, { q: 0.8, gain: 3 }); break;
-      case 'reverseDemon': addFilter('lowshelf', 170, { gain: 2 }); break;
+      case 'badInternet': addFilter('lowpass', 3800); break;
     }
 
-    if (this.effectWorkletAvailable) {
+    if (this.effectWorkletAvailable && WORKLET_EFFECTS.has(this.currentEffect)) {
       try {
         const processor = keep(new AudioWorkletNode(context, 'voice-effect-processor', {
           numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit'
         }));
         processor.port.postMessage({ type: 'configure', effect: this.currentEffect });
-        processor.port.onmessage = event => {
-          if (event.data?.type === 'drained' && this.pendingStopGeneration === this.generation) this.finishRecording(this.pendingStopGeneration);
+                processor.onprocessorerror = () => {
+          if (this.effectProcessor !== processor) return;
+          this.effectWorkletPromise = Promise.resolve(false);
+          this.effectWorkletAvailable = false;
+          this.setEffectCapability(WORKLET_UNAVAILABLE);
+          if (activeCapture(this.mode)) this.cancelRecording('Voice effect processing failed — record again');
+          this.currentEffect = 'normal';
+          if (this.micSource && !activeCapture(this.mode)) this.buildMicGraph();
+          this.updateControls();
         };
         output.connect(processor); output = processor; this.effectProcessor = processor;
       } catch {
         this.effectProcessor = null;
-        if (this.currentEffect === 'autoTune') {
-          this.effectWorkletAvailable = false;
-          this.currentEffect = 'normal';
-          this.setEffectCapability('AUTO-TUNE requires AudioWorklet processing, which is unavailable in this browser.');
-        }
+        this.effectWorkletAvailable = false;
+        this.currentEffect = 'normal';
+        this.setEffectCapability(WORKLET_UNAVAILABLE);
+        this.updateControls();
       }
     } else this.effectProcessor = null;
 
@@ -450,13 +432,13 @@ export class LineRecorder {
         } catch {
           this.analyser = null; this.captureDestination = null;
           this.effectWorkletAvailable = false;
-          this.setEffectCapability('AUTO-TUNE requires AudioWorklet processing, which is unavailable in this browser.');
-          if (this.currentEffect === 'autoTune') this.currentEffect = 'normal';
+          this.setEffectCapability(WORKLET_UNAVAILABLE);
+          if (WORKLET_EFFECTS.has(this.currentEffect)) this.currentEffect = 'normal';
         }
       } else {
         this.effectWorkletAvailable = false;
-        this.setEffectCapability('AUTO-TUNE requires AudioWorklet processing, which is unavailable in this browser.');
-        if (this.currentEffect === 'autoTune') this.currentEffect = 'normal';
+        this.setEffectCapability(WORKLET_UNAVAILABLE);
+        if (WORKLET_EFFECTS.has(this.currentEffect)) this.currentEffect = 'normal';
       }
     } catch { throw new Error('Microphone access required'); }
     this.updateControls();
@@ -941,18 +923,12 @@ export class LineRecorder {
       this.effectInputGain.gain.cancelScheduledValues(this.audioContext.currentTime);
       this.effectInputGain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.004);
     }
-    if (['reverseDemon', 'goblin', 'drunk'].includes(this.currentEffect) && this.effectProcessor) {
-      this.effectProcessor.port.postMessage({ type: 'finish' });
-      const fallback = this.currentEffect === 'reverseDemon' ? 600 : Math.max(800, Math.min(5000, (this.line?.duration || 0) * 80 + 300));
-      this.stopFallbackTimer = setTimeout(() => this.finishRecording(this.pendingStopGeneration), fallback);
-      this.updateControls(); return;
-    }
     if (this.currentEffect === 'walkieTalkie') this.effectProcessor?.port.postMessage({ type: 'endingClick' });
     this.updateControls();
     this.stopFallbackTimer = setTimeout(() => this.finishRecording(this.pendingStopGeneration), this.effectTailMilliseconds());
   }
   effectTailMilliseconds() {
-    return ({ echo: 460, cave: 520, ghost: 480, cursed: 230, walkieTalkie: 45 })[this.currentEffect] || 0;
+    return ({ echo: 460, cave: 750, walkieTalkie: 45 })[this.currentEffect] ?? (WORKLET_EFFECTS.has(this.currentEffect) ? 80 : 0);
   }
   finishRecording(generation) {
     clearTimeout(this.stopFallbackTimer);

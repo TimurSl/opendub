@@ -426,7 +426,11 @@ test('AUTO-TUNE is disabled with an explanation when worklet processing is unava
   assert.match(button.title, /AudioWorklet/);
   recorder.setEffect('autoTune');
   assert.equal(recorder.currentEffect, 'normal');
-  assert.match(elements.get('effect-capability').textContent, /AUTO-TUNE requires AudioWorklet/);
+  recorder.setEffect('goblin');
+  assert.equal(recorder.currentEffect, 'normal', 'other DSP effects cannot be selected if the worklet is unavailable');
+  recorder.setEffect('echo');
+  assert.equal(recorder.currentEffect, 'echo', 'native Web Audio effects still work without the worklet');
+  assert.match(elements.get('effect-capability').textContent, /effects require AudioWorklet/);
 
   recorder.effectWorkletAvailable = true;
   recorder.updateControls();

@@ -66,3 +66,19 @@ export function chromaticSnapSemitones(frequency, reference = 440) {
   const target = reference * Math.pow(2, (midi - 69) / 12);
   return 12 * Math.log2(target / frequency);
 }
+
+// Snap a measured fundamental to the nearest note in a chosen scale/chord.
+// pitchClasses are MIDI note classes (C=0, C#=1 ... B=11).
+export function scaleSnapSemitones(frequency, pitchClasses) {
+  if (!Number.isFinite(frequency) || frequency <= 0 || !Array.isArray(pitchClasses) || !pitchClasses.length) return 0;
+  const midi = 69 + 12 * Math.log2(frequency / 440);
+  const nearest = Math.round(midi);
+  let chosen = nearest;
+  let distance = Infinity;
+  for (let note = nearest - 12; note <= nearest + 12; note++) {
+    if (!pitchClasses.includes(((note % 12) + 12) % 12)) continue;
+    const delta = Math.abs(note - midi);
+    if (delta < distance) { chosen = note; distance = delta; }
+  }
+  return chosen - midi;
+}

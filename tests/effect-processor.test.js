@@ -76,16 +76,16 @@ test('AUTO-TUNE worklet gates unvoiced audio, tracks pitch transitions, resets b
   assert.equal(detuned.frameCount, recordingFrames, 'worklet output duration matches input duration');
   assert.ok([...detuned.output].every(Number.isFinite), 'detuned-tone output remains finite');
   assert.ok(processor.autoTuneVoiced, 'a sustained tone passes the voiced-pitch gate');
-  assert.ok(processor.autoTuneTarget < -0.25, 'the 450 Hz tone is directed down toward A4');
+  assert.ok(processor.autoTuneTarget < -2, 'hard tuning makes a clearly audible correction toward G4');
   const measuredFirst = detectVoicedPitch(detuned.output.subarray(3000), sampleRateHz);
   assert.ok(measuredFirst, 'corrected output remains voiced');
-  assert.ok(Math.abs(measuredFirst.frequency - 440) < 16, `corrected output should approach A4; got ${measuredFirst.frequency} Hz`);
+  assert.ok(Math.abs(measuredFirst.frequency - 392) < 9, `hard-tuned output must reach G4, not stay at 450 Hz; got ${measuredFirst.frequency} Hz`);
 
   const transition = render(processor, repeatedTone(330, recordingFrames, recordingFrames));
   assert.equal(transition.frameCount, recordingFrames);
   assert.ok([...transition.output].every(Number.isFinite));
   assert.ok(processor.autoTuneVoiced);
-  assert.ok(Math.abs(processor.autoTuneTarget) < 0.15, `330 Hz should snap near E4; got ${processor.autoTuneTarget} semitones`);
+  assert.ok(Math.abs(processor.autoTuneTarget) < 0.15, `330 Hz should remain near E4 in the C-major triad; got ${processor.autoTuneTarget} semitones`);
 
   processor.port.onmessage({ data: { type: 'begin', duration: 2 } });
   assert.equal(processor.frame, 0);
@@ -104,4 +104,36 @@ test('AUTO-TUNE worklet gates unvoiced audio, tracks pitch transitions, resets b
   assert.equal(noise.frameCount, noiseInput.length);
   assert.ok([...noise.output].every(Number.isFinite));
   assert.equal(processor.autoTuneVoiced, false, 'broadband noise remains unvoiced');
+});
+
+
+test('pitch effects actually change fundamentals instead of silently leaving speech unchanged', async t => {
+  const processor = await createProcessor(t);
+  const frames = blockSize * 80;
+  const baseFrequency = 210;
+  const expected = { goblin: 210 * 2 ** (6.5 / 12), demon: 210 * 2 ** (-6 / 12), chipmunk: 210 * 2 ** (11 / 12), giant: 210 * 2 ** (-10 / 12) };
+  for (const [effect, target] of Object.entries(expected)) {
+    processor.port.onmessage({ data: { type: 'configure', effect } });
+    processor.port.onmessage({ data: { type: 'begin', duration: 2 } });
+    const output = render(processor, repeatedTone(baseFrequency, frames)).output;
+    assert.ok(output.every(Number.isFinite), `${effect} produces valid samples`);
+    const measured = detectVoicedPitch(output.subarray(frames - 4096), sampleRateHz, { confidenceThreshold: 0.65 });
+    assert.ok(measured, `${effect} produces pitched sound`);
+    assert.ok(Math.abs(measured.frequency - target) < target * 0.08, `${effect} should shift ${baseFrequency} Hz near ${target.toFixed(1)} Hz, got ${measured.frequency.toFixed(1)} Hz`);
+  }
+});
+
+test('worklet only changes audio for its selected effect; normal and click effects work', async t => {
+  const processor = await createProcessor(t);
+  const frames = blockSize * 28;
+  const source = repeatedTone(210, frames);
+  processor.port.onmessage({ data: { type: 'configure', effect: 'normal' } });
+  assert.deepEqual(render(processor, source).output, source, 'normal passes samples through exactly');
+  processor.port.onmessage({ data: { type: 'configure', effect: 'walkieTalkie' } });
+  processor.port.onmessage({ data: { type: 'begin', duration: 1 } });
+  const clicked = render(processor, new Float32Array(frames)).output;
+  assert.ok(clicked.some(sample => Math.abs(sample) > 0.05), 'walkie-talkie has an audible start click');
+  processor.port.onmessage({ data: { type: 'endingClick' } });
+  const ending = render(processor, new Float32Array(frames)).output;
+  assert.ok(ending.some(sample => Math.abs(sample) > 0.05), 'walkie-talkie has an audible end click');
 });
