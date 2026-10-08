@@ -67,7 +67,7 @@ export async function runCustomAudio(ffmpegPath, inputPath, outputPath, graph, s
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '1',
     '-protocol_whitelist', 'file,pipe', '-i', inputPath,
     '-map', '0:a:0', '-vn', '-sn', '-dn', '-filter_threads', '1',
-    '-af', graph, '-t', String(Math.min(120, Math.max(2, seconds + 2))),
+    '-af', graph, '-t', String(Math.min(125, Math.max(2, seconds + 3.5))),
     '-c:a', 'libopus', '-application', 'voip', '-b:a', '96k', '-ac', '1', '-ar', '48000',
     '-f', 'webm', '-y', outputPath,
   ];

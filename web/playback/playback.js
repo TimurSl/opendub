@@ -295,12 +295,14 @@ export class DubPlayback {
     for (const line of session.pack.lines) {
       const take = session.lineTakes[line.id]; if (take?.status !== 'accepted') continue;
       const buffer = this.buffers.get(take.id); if (!buffer) continue;
-      this.schedule(buffer, audioWindow(line.startTime, line.duration, buffer.duration, position, contextStart));
+      const leadIn = take.leadIn ?? 0; const tail = take.tail ?? 0;
+      this.schedule(buffer, audioWindow(line.startTime - leadIn, line.duration + leadIn + tail, buffer.duration, position, contextStart));
     }
     this.runningId = playback.id;
     if (this.player) this.updatePlayerControls();
     else { this.stopButton.disabled = false; this.resumeButton.hidden = true; }
-    const finish = Math.max(backing.duration, Number.isFinite(this.video.duration) ? this.video.duration : 0, ...session.pack.lines.map(line => line.endTime));
+    const finish = Math.max(backing.duration, Number.isFinite(this.video.duration) ? this.video.duration : 0,
+      ...session.pack.lines.map(line => line.endTime + (session.lineTakes[line.id]?.tail || 0)));
     let visualStarted = false;
     const step = () => {
       if (this.runningId !== playback.id) return;

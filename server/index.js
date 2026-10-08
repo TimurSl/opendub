@@ -140,14 +140,17 @@ async function exportDub(pack, dataDir, ffmpegPath, acceptedTakes) {
       const copy = path.join(work, index + ".audio");
       await fs.copyFile(take.path, copy);
       args.push("-i", copy);
-      voiceInputs.push({ input: index + 2, delay: Math.max(0, Math.round(line.startTime * 1000)), duration: line.duration, key: `voice${index}` });
+      const leadIn = take.leadIn ?? 0; const tail = take.tail ?? 0;
+      const timelineStart = line.startTime - leadIn;
+      voiceInputs.push({ input: index + 2, delay: Math.max(0, Math.round(timelineStart * 1000)), skip: Math.max(0, -timelineStart), duration: line.duration + leadIn + tail, key: `voice${index}` });
     }
     const filters = ["[1:a]asetpts=PTS-STARTPTS[base]"];
-    for (const voice of voiceInputs) filters.push(`[${voice.input}:a]atrim=duration=${voice.duration.toFixed(6)},asetpts=PTS-STARTPTS,adelay=${voice.delay}:all=1[${voice.key}]`);
+    for (const voice of voiceInputs) filters.push(`[${voice.input}:a]atrim=start=${voice.skip.toFixed(6)}:duration=${voice.duration.toFixed(6)},asetpts=PTS-STARTPTS,adelay=${voice.delay}:all=1[${voice.key}]`);
     const sources = ["[base]", ...voiceInputs.map(voice => `[${voice.key}]`)].join("");
     filters.push(`${sources}amix=inputs=${voiceInputs.length + 1}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]`);
     args.push(
       "-filter_complex", filters.join(";"), "-map", "0:v:0", "-map", "[aout]",
+      "-vf", "tpad=stop_mode=clone:stop_duration=2", // Let final-line audio finish after the last video frame.
       "-c:v", "libx264", "-preset", "fast", "-crf", "21", "-pix_fmt", "yuv420p",
       "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", "-y", output,
     );
@@ -477,7 +480,17 @@ export async function createRuntime(options = {}) {
       destination = store.takePath({ id });
       await store.mutate(async () => {
         // Ownership/lifecycle checks happen after the whole upload, too.
-        store.storeTake({ playerId: req.viewer.playerId, lineId: req.params.lineId, id, mime, size: req.file.size, matchId: req.uploadMatchId, previousTakeId: req.previousTakeId, lineVersion: req.uploadLineVersion, retakeId: req.uploadRetakeId });
+        const parseTiming = (key, maximum) => {
+          const text = req.get(key);
+          if (text == null) return 0; // Legacy clients record exactly on the cue.
+          if (!/^(?:0|[1-9]\d*)(?:\.\d{1,4})?$/.test(text)) fail('Invalid take timing', 400);
+          const value = Number(text);
+          if (!Number.isFinite(value) || value > maximum) fail('Invalid take timing', 400);
+          return value;
+        };
+        const leadIn = parseTiming('x-take-lead-in', 1);
+        const tail = parseTiming('x-take-tail', 2);
+        store.storeTake({ playerId: req.viewer.playerId, lineId: req.params.lineId, id, mime, size: req.file.size, matchId: req.uploadMatchId, previousTakeId: req.previousTakeId, lineVersion: req.uploadLineVersion, retakeId: req.uploadRetakeId, leadIn, tail });
         await fs.rename(req.file.path, destination);
         await fs.chmod(destination, 0o600);
       });

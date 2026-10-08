@@ -134,3 +134,15 @@ Public relay, ffmpeg export, Workshop publishing, accounts, and cloud storage ar
 ## License
 
 Runtime source is licensed under the MIT License; see [LICENSE](LICENSE). User-provided Workshop content, including any pre-existing `example_pack/` directory, is excluded from that license. Pack authors retain their own rights. Do not redistribute Workshop media unless you have permission. This project is not affiliated with or endorsed by Dub Together.
+
+## Live recording waveform and uncropped voice edges
+
+The purple original waveform is visible before recording, and a cyan trace grows
+across it live from the processed microphone audio during the take. Recording
+now primes the MediaRecorder **before** the video cue and keeps the microphone
+open after the cue finishes. Browser noise suppression and auto gain control are disabled for this recorder,
+as their voice activity gating can cut quiet first/last syllables (headphones are
+recommended to prevent feedback). The measured lead-in and allowed tail are stored
+with the take (legacy takes use zero padding) and used for host/player playback
+and exported MP4 audio. Custom FFmpeg remains post-processing, so its live cyan
+trace shows the incoming recording rather than the resulting FFmpeg effect.

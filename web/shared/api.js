@@ -4,7 +4,7 @@ export class RuntimeClient extends EventTarget {
     this.bestRtt = Infinity; this.reconnectTimer = null; this.pingSent = 0;
     this.active = false;
   }
-  async request(path, body, { multipart = false, method, retakeId } = {}) {
+  async request(path, body, { multipart = false, method, retakeId, takeTiming } = {}) {
     const matchId = this.state?.session?.matchId;
     const partyOnly = ['/api/admin/packs', '/api/admin/login', '/api/admin/create-party', '/api/admin/next-match', '/api/admin/select', '/api/admin/settings'].includes(path);
     const matchScoped = path.startsWith('/api/player/') || /^\/api\/takes\/[^/]+(?:\/accept|\/retake(?:\/cancel)?|\/discard)?$/.test(path) || (path.startsWith('/api/admin/') && !partyOnly);
@@ -15,6 +15,10 @@ export class RuntimeClient extends EventTarget {
     if (path === '/api/admin/select' && this.state?.session?.partyCreated) body = { ...body, partyId: this.state.session.id };
     if (multipart && path.startsWith('/api/takes/') && matchId) headers['X-Match-ID'] = matchId;
     if (multipart && retakeId) headers['X-Retake-ID'] = retakeId;
+    if (multipart && takeTiming) {
+      headers['X-Take-Lead-In'] = String(takeTiming.leadIn);
+      headers['X-Take-Tail'] = String(takeTiming.tail);
+    }
     const response = await fetch(path, {
       method: method || (body === undefined ? 'GET' : 'POST'),
       credentials: 'same-origin', cache: 'no-store',

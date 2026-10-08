@@ -207,3 +207,21 @@ test('player download errors are friendly and PLAY retries after the media becom
   await playback.playPlayer();
   assert.equal(playback.runningId, 'movie');
 });
+
+
+test('padded takes start before the cue and are not clipped at the end', () => {
+  const clip = audioWindow(4 - 0.22, 2 + 0.22 + 0.65, 2.9, 0, 10);
+  close(clip.when, 13.78);
+  close(clip.duration, 2.87);
+  const late = audioWindow(4 - 0.22, 2.87, 2.9, 6.3, 10);
+  close(late.when, 10);
+  close(late.offset, 2.52);
+  close(late.duration, 0.35);
+});
+
+test('take overlapping the beginning of a pack discards negative-time audio', () => {
+  const clip = audioWindow(-0.22, 2.87, 2.87, 0, 10);
+  close(clip.when, 10);
+  close(clip.offset, 0.22);
+  close(clip.duration, 2.65);
+});

@@ -134,11 +134,11 @@ export class SessionStore extends EventEmitter {
   snapshot(viewer) {
     const lineTakes = record({});
     for (const [lineId, take] of Object.entries(this.data.lineTakes)) {
-      lineTakes[lineId] = { id: take.id, playerId: take.playerId, character: take.character, startTime: take.startTime, endTime: take.endTime, status: take.status, url: "/takes/" + take.id };
+      lineTakes[lineId] = { id: take.id, playerId: take.playerId, character: take.character, startTime: take.startTime, endTime: take.endTime, status: take.status, url: "/takes/" + take.id, leadIn: take.leadIn || 0, tail: take.tail || 0 };
     }
     const replacementTakes = record({});
     if (viewer.kind === "player") for (const [lineId, take] of Object.entries(this.data.replacementTakes)) {
-      if (take.playerId === viewer.playerId) replacementTakes[lineId] = { id: take.id, playerId: take.playerId, retakeId: take.retakeId, status: "recorded", url: "/takes/" + take.id };
+      if (take.playerId === viewer.playerId) replacementTakes[lineId] = { id: take.id, playerId: take.playerId, retakeId: take.retakeId, status: "recorded", url: "/takes/" + take.id, leadIn: take.leadIn || 0, tail: take.tail || 0 };
     }
     const activeRetakes = Object.values(this.data.activeRetakes)
       .filter(retake => viewer.kind === "admin" || retake.playerId === viewer.playerId)
@@ -474,7 +474,7 @@ export class SessionStore extends EventEmitter {
     delete this.data.lineTakes[lineId];
     this.completionPhase();
   }
-  storeTake({ playerId, lineId, id, mime, size, matchId, previousTakeId, lineVersion, retakeId }) {
+  storeTake({ playerId, lineId, id, mime, size, matchId, previousTakeId, lineVersion, retakeId, leadIn = 0, tail = 0 }) {
     this.requireMatch(matchId);
     const line = this.requireOwner(playerId, lineId);
     if ((this.data.lineVersions[lineId] ?? 0) !== lineVersion) fail("Line changed during upload; retry", 409);
@@ -486,13 +486,13 @@ export class SessionStore extends EventEmitter {
       if (existing?.status !== "accepted" || existing.id !== active.acceptedTakeId) fail("Accepted take changed during upload", 409);
       const current = this.data.replacementTakes[lineId];
       if ((current?.id ?? null) !== previousTakeId) fail("Replacement changed during upload; retry", 409);
-      take = { id, playerId, matchId, retakeId, lineId, lineVersion, acceptedTakeId: active.acceptedTakeId, character: line.character, startTime: line.startTime, endTime: line.endTime, status: "recorded", mime, size };
+      take = { id, playerId, matchId, retakeId, lineId, lineVersion, acceptedTakeId: active.acceptedTakeId, character: line.character, startTime: line.startTime, endTime: line.endTime, status: "recorded", mime, size, leadIn, tail };
       this.data.replacementTakes[lineId] = take;
     } else {
       if (existing?.status === "accepted") fail("Accepted take requires an active replacement retake", 409);
       if (this.data.activeRetakes[lineId]) fail("Include the active retake ID", 409);
       if ((existing?.id ?? null) !== previousTakeId) fail("Take changed during upload; retry", 409);
-      take = { id, playerId, matchId, character: line.character, startTime: line.startTime, endTime: line.endTime, status: "recorded", mime, size };
+      take = { id, playerId, matchId, character: line.character, startTime: line.startTime, endTime: line.endTime, status: "recorded", mime, size, leadIn, tail };
       this.data.lineTakes[lineId] = take;
     }
     return take;

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LineRecorder } from '../web/recorder/recorder.js';
+import { createLivePeaks } from '../web/recorder/live-waveform.js';
 
 class Element extends EventTarget {
   constructor() {
@@ -313,6 +314,10 @@ test('the 0.2-second scene lead-in and take-review waits are cancelable and do n
   await delay(220); await recording;
   assert.equal(recorder.mode, 'recording'); assert.equal(recorder.video.playCount, 1);
   recorder.stopRecording(); await delay(20);
+  assert.equal(recorder.mode, 'recording', 'the microphone must remain open for the tail');
+  assert.equal(recorder.recorder.state, 'recording');
+  assert.ok(recorder.captureTiming.tail >= 0.65);
+  recorder.finishRecording(recorder.generation); await turn();
   assert.equal(recorder.mode, 'settling'); assert.equal(savesDuringReviewWait, 1);
   await delay(220);
   assert.equal(recorder.mode, 'review');
@@ -564,4 +569,37 @@ test('Custom failure restores the previous take without uploading raw audio', as
   assert.equal(recorder.blob, original);
   assert.match(recorder.status.textContent, /Forbidden FFmpeg filter/);
   assert.equal(calls.length, 0);
+});
+
+
+test('waveform paints the reference and recorded microphone peaks simultaneously before the take finishes', t => {
+  const { recorder } = fixture(t);
+  recorder.referenceSamples = new Float32Array([-0.5, 0.4, -0.3, 0.2]);
+  recorder.referenceSampleRate = 4; recorder.referenceDuration = 1;
+  recorder.captureStartedAt = performance.now() - 200;
+  recorder.captureTiming = { leadIn: 0.2, tail: 0.65 };
+  recorder.livePeaks = createLivePeaks(4);
+  recorder.captureAnalyser = { fftSize: 4, getFloatTimeDomainData(samples) { samples.set([-0.4, 0.8, -0.2, 0.5]); } };
+  recorder.mode = 'recording'; recorder.sampleLiveWaveform(); recorder.drawWaveform(true);
+  const strokes = recorder.waveform.context.strokes;
+  assert.ok(strokes.some(item => item.color === '#b093ff'), 'purple original waveform');
+  assert.ok(strokes.some(item => item.color === '#67e5ff'), 'cyan live take waveform');
+  assert.ok(strokes.some(item => item.color === '#f4f4f4'), 'moving recording cursor');
+});
+
+test('stopping the take retains microphone audio until the tail finishes', t => {
+  const { recorder } = fixture(t);
+  let stopped = false; let gateChanged = false;
+  recorder.mode = 'recording';
+  recorder.recorder = { state: 'recording', stop() { stopped = true; this.state = 'inactive'; } };
+  recorder.audioContext = { currentTime: 0, close: () => Promise.resolve() };
+  recorder.effectInputGain = { gain: { cancelScheduledValues() { gateChanged = true; }, setTargetAtTime() { gateChanged = true; } } };
+  recorder.captureTiming = { leadIn: 0.18, tail: 0.65 };
+  recorder.stopRecording();
+  assert.equal(recorder.stopRequested, true);
+  assert.equal(stopped, false);
+  assert.equal(gateChanged, false, 'microphone is not muted prematurely');
+  assert.ok(recorder.captureTiming.tail >= 0.65);
+  recorder.finishRecording(recorder.generation);
+  assert.equal(stopped, true);
 });

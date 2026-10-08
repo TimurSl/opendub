@@ -1,3 +1,8 @@
+import { createLivePeaks, appendLivePeaks } from './live-waveform.js';
+
+const CAPTURE_PRIME_MS = 180; // Start the encoder before the video cue (avoid losing the first phoneme).
+const CAPTURE_TAIL_MS = 650; // Keep the mic live after the video cue ends.
+
 export function chooseRecordingMime(Recorder = globalThis.MediaRecorder) {
   return ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/webm']
     .find(type => Recorder?.isTypeSupported(type)) || '';
@@ -47,7 +52,7 @@ export class LineRecorder {
     this.saveJob = null; this.saveTail = Promise.resolve(); this.destroyed = false; this.waits = new Set();
     this.mediaWaits = new Set();
     this.waveformCache = new Map(); this.decodedTakes = new Map(); this.referenceSamples = null; this.takeSamples = null;
-    this.referenceDuration = 0; this.takeDuration = 0; this.waveformGeneration = 0; this.referenceGeneration = 0; this.takeGeneration = 0;
+    this.referenceDuration = 0; this.takeDuration = 0; this.localTiming = null; this.captureTiming = null; this.livePeaks = null; this.waveformGeneration = 0; this.referenceGeneration = 0; this.takeGeneration = 0;
     this.video = document.getElementById('line-video');
     this.reference = document.getElementById('reference-audio');
     this.review = document.getElementById('take-review');
@@ -420,7 +425,7 @@ export class LineRecorder {
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !globalThis.MediaRecorder) throw new Error('Microphone access required');
     if (this.stream?.getAudioTracks().some(track => track.readyState === 'live')) return;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false });
       if (this.destroyed) { stream.getTracks().forEach(track => track.stop()); return; }
       this.stream = stream;
       stream.getAudioTracks().forEach(track => track.addEventListener('ended', () => {
@@ -554,7 +559,7 @@ export class LineRecorder {
       this.dismissedTakeId = null; this.observedCandidateId = null;
       this.acceptedTake = null; this.retakeId = ''; this.retakeAttemptId = ''; this.retakeAttemptPending = false;
       if (matchChanged) { this.waveformCache.clear(); this.decodedTakes.clear(); }
-      this.referenceSamples = null; this.takeSamples = null; this.referenceDuration = 0; this.takeDuration = 0;
+      this.referenceSamples = null; this.takeSamples = null; this.referenceDuration = 0; this.takeDuration = 0; this.localTiming = null; this.captureTiming = null; this.livePeaks = null;
       this.referenceSampleRate = 0; this.takeSampleRate = 0;
     } else if (!allowed && this.allowed && (activeCapture(this.mode) || this.currentSave() || this.mode === 'accepting')) {
       this.abort('', true);
@@ -660,23 +665,30 @@ export class LineRecorder {
     this.activeAnalyser = this.ensureMediaAnalyser(mediaElement) || null;
     if (context?.state === 'suspended') context.resume().catch(() => {});
     this.mode = mode; this.updateControls(); this.drawWaveform(true);
-    const fragmentStart = padded ? Math.max(0, line.startTime - (this.settings?.previewBefore ?? 1.5)) : line.startTime;
-    const fragmentEnd = padded ? line.endTime + (this.settings?.previewAfter ?? 0.5) : line.endTime;
+    const takeTiming = this.localTiming || this.savedTake || this.acceptedTake;
+    const leadIn = mode === 'my-take' ? (takeTiming?.leadIn || 0) : 0;
+    const tail = mode === 'my-take' ? (takeTiming?.tail || 0) : 0;
+    const takeTimelineStart = line.startTime - leadIn;
+    const fragmentStart = mode === 'my-take' ? Math.max(0, takeTimelineStart)
+      : padded ? Math.max(0, line.startTime - (this.settings?.previewBefore ?? 1.5)) : line.startTime;
+    const fragmentEnd = mode === 'my-take' ? line.endTime + tail : padded ? line.endTime + (this.settings?.previewAfter ?? 0.5) : line.endTime;
     let audioTail = 0;
     await this.seek(fragmentStart);
     if (generation !== this.generation || mediaGeneration !== this.mediaGeneration) return;
     if (audio) {
       audio.load();
       if (audio.readyState < 2) await this.waitMedia(audio, 'loadeddata');
-      audio.currentTime = 0;
-      if (mode === 'my-take' && Number.isFinite(audio.duration)) audioTail = Math.max(0, audio.duration - (line.endTime - line.startTime));
+      // A cue at video time zero cannot play negative-time lead-in. Skip just
+      // that portion of the take, keeping the actual speech on the cue.
+      audio.currentTime = mode === 'my-take' ? Math.max(0, -takeTimelineStart) : 0;
+      if (mode === 'my-take' && Number.isFinite(audio.duration)) audioTail = Math.max(0, audio.duration - (line.endTime - takeTimelineStart));
     }
     if (generation !== this.generation || mediaGeneration !== this.mediaGeneration) return;
     this.video.muted = !fallback;
     this.status.textContent = mode === 'original' ? 'Original' : 'My take';
     let voiceStarted = false;
     const startAudio = () => {
-      if (!audio || voiceStarted || this.video.currentTime < line.startTime - 0.005 || generation !== this.generation || mediaGeneration !== this.mediaGeneration) return;
+      if (!audio || voiceStarted || this.video.currentTime < (mode === 'my-take' ? fragmentStart : line.startTime) - 0.005 || generation !== this.generation || mediaGeneration !== this.mediaGeneration) return;
       voiceStarted = true;
       audio.play().catch(() => { this.stopMedia(); this.friendly('Video unavailable — ask host'); });
     };
@@ -686,9 +698,9 @@ export class LineRecorder {
     const step = () => {
       if (generation !== this.generation || mediaGeneration !== this.mediaGeneration) return;
       // Voice playback supplies the fragment timeline when an audio take exists.
-      if (audio && !voiceStarted && this.video.currentTime >= line.startTime) startAudio();
+      if (audio && !voiceStarted && this.video.currentTime >= (mode === 'my-take' ? fragmentStart : line.startTime)) startAudio();
       if (audio && voiceStarted && !audio.paused && !audio.ended && this.video.currentTime < line.endTime) {
-        const desired = line.startTime + audio.currentTime;
+        const desired = (mode === 'my-take' ? takeTimelineStart : line.startTime) + audio.currentTime;
         if (Math.abs(this.video.currentTime - desired) > 0.15) this.video.currentTime = Math.min(desired, line.endTime);
       }
       if (audio && this.video.currentTime >= line.endTime) {
@@ -752,7 +764,7 @@ export class LineRecorder {
     else if (['original', 'my-take'].includes(this.mode)) this.stopMedia();
   }
   captureBackup() {
-    return { blob: this.blob, objectUrl: this.objectUrl, savedTake: this.savedTake, savedBlob: this.savedBlob, dismissedTakeId: this.dismissedTakeId, retakeId: this.retakeId, acceptedTake: this.acceptedTake };
+    return { blob: this.blob, objectUrl: this.objectUrl, savedTake: this.savedTake, savedBlob: this.savedBlob, dismissedTakeId: this.dismissedTakeId, retakeId: this.retakeId, acceptedTake: this.acceptedTake, localTiming: this.localTiming };
   }
   async resolveRetakeId(lineId, generation = this.generation) {
     if (this.retakeId) return this.retakeId;
@@ -822,6 +834,11 @@ export class LineRecorder {
     recorder.addEventListener('stop', () => {
       if (generation !== this.generation) return;
       clearTimeout(this.stopFallbackTimer); this.stopRequested = false; this.pendingStopGeneration = null;
+      if (this.captureTiming && this.stopRequestedAt) {
+        this.captureTiming.tail = Math.min(2, Math.round((performance.now() - this.stopRequestedAt) / 10) / 100);
+      }
+      this.localTiming = this.captureTiming ? { ...this.captureTiming } : null;
+      this.captureTiming = null; this.livePeaks = null; this.captureStartedAt = 0; this.stopRequestedAt = 0;
       this.stopMedia(); clearTimeout(this.recordingWatchdog);
       if (this.progress) this.progress.hidden = true;
       const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || 'audio/webm' });
@@ -830,32 +847,57 @@ export class LineRecorder {
         if (generation === this.generation) this.cancelRecording('Recording failed — try again');
       });
     }, { once: true });
+    // MediaRecorder now starts BEFORE video.play(), avoiding the previously lost
+    // first ~100-200ms. The measured offset travels with the take to playback/export.
+    const captureStart = performance.now();
+    this.captureStartedAt = captureStart;
+    this.captureTiming = { leadIn: 0, tail: CAPTURE_TAIL_MS / 1000 };
+    this.livePeaks = createLivePeaks(line.duration + 3);
+    this.dismissedTakeId = this.backup?.savedTake?.id ?? this.observedCandidateId;
+    this.blob = null; this.objectUrl = null; this.savedTake = null; this.savedBlob = null; this.localTiming = null;
+    this.takeGeneration++; this.takeSamples = null; this.takeDuration = 0; this.takeSampleRate = 0;
+    this.stopRequested = false; this.pendingStopGeneration = null;
+    if (this.effectInputGain && this.audioContext) {
+      this.effectInputGain.gain.cancelScheduledValues(this.audioContext.currentTime);
+      this.effectInputGain.gain.setTargetAtTime(1, this.audioContext.currentTime, 0.004);
+    }
+    this.effectProcessor?.port.postMessage({ type: 'begin', duration: line.duration + 3 });
+    recorder.start();
+    this.mode = 'preroll'; this.status.textContent = 'Capturing lead-in…'; this.waveform.hidden = false;
+    if (this.progress) { this.progress.max = line.duration; this.progress.value = 0; this.progress.hidden = false; }
+    this.updateControls();
+    const prerollDraw = () => {
+      if (generation !== this.generation || recorder.state !== 'recording' || this.mode !== 'preroll') return;
+      this.sampleLiveWaveform(); this.drawWaveform(true);
+      this.frame = requestAnimationFrame(prerollDraw);
+    };
+    this.frame = requestAnimationFrame(prerollDraw);
     const start = () => {
       this.startListener = null;
-      if (generation !== this.generation || recorder.state !== 'inactive') return;
-      this.dismissedTakeId = this.backup?.savedTake?.id ?? this.observedCandidateId;
-      this.blob = null; this.objectUrl = null; this.savedTake = null; this.savedBlob = null;
-      this.stopRequested = false; this.pendingStopGeneration = null;
-      if (this.effectInputGain && this.audioContext) this.effectInputGain.gain.setTargetAtTime(1, this.audioContext.currentTime, 0.004);
-      this.effectProcessor?.port.postMessage({ type: 'begin', duration: line.duration });
-      recorder.start();
+      cancelAnimationFrame(this.frame);
+      if (generation !== this.generation || recorder.state !== 'recording') return;
+      const leadIn = (performance.now() - captureStart) / 1000;
+      if (leadIn > 1) { this.cancelRecording('Video took too long to start — record again'); return; }
+      this.captureTiming.leadIn = Math.round(Math.max(0, leadIn) * 1000) / 1000;
+      this.mode = 'recording'; this.status.textContent = 'Recording'; this.updateControls();
       this.recordingWatchdog = setTimeout(() => {
         if (generation === this.generation && recorder.state === 'recording') { this.cancelRecording(); this.friendly('Recording failed — try again'); }
-      }, (line.duration + 2) * 1000);
-      this.mode = 'recording'; this.status.textContent = 'Recording'; this.waveform.hidden = false;
-      if (this.progress) { this.progress.max = line.duration; this.progress.value = 0; this.progress.hidden = false; }
-      this.updateControls();
-      this.drawWaveform(true);
+      }, (line.duration + 4) * 1000);
       let previousTime = this.video.currentTime; let lastAdvance = performance.now(); let lastSemantic = 0;
       const step = () => {
         if (generation !== this.generation || recorder.state !== 'recording') return;
         const now = performance.now();
-        if (this.video.currentTime > previousTime + 0.001) { previousTime = this.video.currentTime; lastAdvance = now; }
-        if (this.video.ended && this.video.currentTime < line.endTime - 0.05 || now - lastAdvance > 1500) {
-          this.cancelRecording(); this.friendly('Recording failed — try again'); return;
+        this.sampleLiveWaveform();
+        if (!this.reducedMotion || now - (this.lastWaveformDrawAt || 0) > 120) {
+          this.lastWaveformDrawAt = now; this.drawWaveform(true);
         }
-        if (this.video.currentTime >= line.endTime || this.video.ended) { this.stopRecording(); return; }
-        if (!this.reducedMotion) this.drawWaveform(true);
+        if (!this.stopRequested) {
+          if (this.video.currentTime > previousTime + 0.001) { previousTime = this.video.currentTime; lastAdvance = now; }
+          if ((this.video.ended && this.video.currentTime < line.endTime - 0.05) || now - lastAdvance > 1500) {
+            this.cancelRecording(); this.friendly('Recording failed — try again'); return;
+          }
+          if (this.video.currentTime >= line.endTime || this.video.ended) this.stopRecording();
+        }
         if (now - lastSemantic > 250) {
           if (this.progress) this.progress.value = Math.max(0, Math.min(line.duration, this.video.currentTime - line.startTime));
           lastSemantic = now;
@@ -866,8 +908,19 @@ export class LineRecorder {
     };
     this.startListener = start;
     this.video.muted = true; this.video.addEventListener('playing', start, { once: true });
+    await this.waitCancelable(CAPTURE_PRIME_MS, generation);
+    if (generation !== this.generation) return;
     try { await this.video.play(); } catch (error) { this.video.removeEventListener('playing', start); throw error; }
   }
+  sampleLiveWaveform() {
+    if (!this.livePeaks || !this.captureAnalyser || !this.captureStartedAt) return;
+    const analyser = this.captureAnalyser;
+    const data = this.liveSamples?.length === analyser.fftSize ? this.liveSamples : new Float32Array(analyser.fftSize);
+    this.liveSamples = data;
+    analyser.getFloatTimeDomainData?.(data);
+    appendLivePeaks(this.livePeaks, (performance.now() - this.captureStartedAt) / 1000, data);
+  }
+
   async prepareRecordedTake(blob, line, generation) {
     if (generation !== this.generation) return;
       this.mode = 'settling'; this.status.textContent = this.currentEffect === 'custom' ? 'Applying Custom FFmpeg effect…' : 'Finishing take…'; this.updateControls();
@@ -910,14 +963,19 @@ export class LineRecorder {
     const context = this.waveform.getContext('2d'); if (!context) return;
     const width = bounds.width; const height = bounds.height; const center = height / 2;
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0); context.clearRect(0, 0, width, height);
-    const duration = Math.max(this.line?.duration || 0, this.referenceDuration, this.takeDuration, 0.05);
-    const drawSamples = (samples, sampleRate, sampleDuration, color, alpha) => {
+    const isCapturing = this.livePeaks && ['preroll', 'recording'].includes(this.mode);
+    const take = this.savedTake || this.acceptedTake;
+    const timing = isCapturing ? this.captureTiming : (this.localTiming || take);
+    const leadIn = timing?.leadIn || 0; const tail = timing?.tail || 0;
+    const duration = Math.max((this.line?.duration || 0) + leadIn + tail, this.referenceDuration + leadIn, this.takeDuration, 0.05);
+    const drawSamples = (samples, sampleRate, sampleDuration, color, alpha, offset = 0) => {
       if (!samples?.length || !sampleRate || !sampleDuration) return;
       context.globalAlpha = alpha; context.strokeStyle = color; context.lineWidth = 1;
       const scale = height * 0.43; const columns = Math.max(1, Math.ceil(width));
       const samplesPerColumn = Math.max(1, Math.ceil(duration * sampleRate / columns));
       for (let column = 0; column < columns; column++) {
-        const time = column / columns * duration;
+        const time = column / columns * duration - offset;
+        if (time < 0) continue;
         if (time >= sampleDuration) break;
         const start = Math.min(samples.length - 1, Math.floor(time * sampleRate));
         const end = Math.min(samples.length, Math.max(start + 1, start + samplesPerColumn));
@@ -930,10 +988,22 @@ export class LineRecorder {
     };
     context.strokeStyle = '#515151'; context.lineWidth = 1;
     context.beginPath(); context.moveTo(0, center); context.lineTo(width, center); context.stroke();
-    drawSamples(this.referenceSamples, this.referenceSampleRate, this.referenceDuration, '#b093ff', 0.82);
-    drawSamples(this.takeSamples, this.takeSampleRate, this.takeDuration, '#67e5ff', 0.98);
-    if (['original', 'my-take'].includes(this.mode)) {
-      const elapsed = this.mode === 'my-take' ? this.review.currentTime : this.video.currentTime - this.line.startTime;
+    drawSamples(this.referenceSamples, this.referenceSampleRate, this.referenceDuration, '#b093ff', 0.82, leadIn);
+    if (isCapturing) {
+      context.strokeStyle = '#67e5ff'; context.lineWidth = 1.5; context.globalAlpha = 0.98;
+      const peaks = this.livePeaks; const scale = height * 0.43;
+      for (let bin = 0; bin < peaks.recorded.length; bin++) {
+        if (!peaks.recorded[bin]) continue;
+        const x = (bin / peaks.binsPerSecond) / duration * width;
+        if (x > width) break;
+        context.beginPath(); context.moveTo(x, center - peaks.maxima[bin] * scale);
+        context.lineTo(x, center - peaks.minima[bin] * scale); context.stroke();
+      }
+      context.globalAlpha = 1;
+    } else drawSamples(this.takeSamples, this.takeSampleRate, this.takeDuration, '#67e5ff', 0.98);
+    if (['original', 'my-take', 'recording', 'preroll'].includes(this.mode)) {
+      const elapsed = isCapturing ? Math.max(0, (performance.now() - this.captureStartedAt) / 1000)
+        : this.mode === 'my-take' ? this.review.currentTime : this.video.currentTime - this.line.startTime + leadIn;
       const x = Math.max(0, Math.min(width, elapsed / duration * width));
       context.strokeStyle = '#f4f4f4'; context.lineWidth = 1.5; context.globalAlpha = 0.95;
       context.beginPath(); context.moveTo(x, 0); context.lineTo(x, height); context.stroke(); context.globalAlpha = 1;
@@ -942,29 +1012,30 @@ export class LineRecorder {
 
   stopRecording() {
     if (this.mode !== 'recording' || this.recorder?.state !== 'recording' || this.stopRequested) return;
-    this.video.pause(); cancelAnimationFrame(this.frame); clearTimeout(this.recordingWatchdog);
-    this.stopRequested = true; this.pendingStopGeneration = this.generation;
-    if (this.effectInputGain && this.audioContext) {
-      this.effectInputGain.gain.cancelScheduledValues(this.audioContext.currentTime);
-      this.effectInputGain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.004);
-    }
+    this.video.pause(); clearTimeout(this.recordingWatchdog);
+    this.stopRequested = true; this.pendingStopGeneration = this.generation; this.stopRequestedAt = performance.now();
+    // Do not close the capture gate here: that was cutting final consonants.
+    // The microphone stays live for the tail and the recorder stops afterward.
     if (this.currentEffect === 'walkieTalkie') this.effectProcessor?.port.postMessage({ type: 'endingClick' });
-    this.updateControls();
-    this.stopFallbackTimer = setTimeout(() => this.finishRecording(this.pendingStopGeneration), this.effectTailMilliseconds());
+    this.status.textContent = 'Capturing the end…'; this.updateControls();
+    const tailMs = this.effectTailMilliseconds();
+    if (this.captureTiming) this.captureTiming.tail = tailMs / 1000;
+    this.stopFallbackTimer = setTimeout(() => this.finishRecording(this.pendingStopGeneration), tailMs);
   }
   effectTailMilliseconds() {
-    return ({ echo: 460, cave: 750, walkieTalkie: 45 })[this.currentEffect] ?? (WORKLET_EFFECTS.has(this.currentEffect) ? 80 : 0);
+    return ({ echo: 850, cave: 1100 })[this.currentEffect] ?? CAPTURE_TAIL_MS;
   }
   finishRecording(generation) {
     clearTimeout(this.stopFallbackTimer);
     if (generation !== this.generation || this.recorder?.state !== 'recording') return;
-    this.pendingStopGeneration = null; this.stopRequested = false;
+    this.pendingStopGeneration = null;
     try { this.recorder.stop(); } catch {}
   }
   cancelRecording(message = '', discard = false) {
     this.generation++; this.cancelPendingWaits(); this.stopMedia(); clearTimeout(this.recordingWatchdog); clearTimeout(this.stopFallbackTimer);
     this.takeGeneration++;
     this.stopRequested = false; this.pendingStopGeneration = null;
+    this.captureTiming = null; this.livePeaks = null; this.captureStartedAt = 0; this.stopRequestedAt = 0;
     this.countdown.hidden = true; this.waveform.hidden = false;
     if (this.progress) this.progress.hidden = true;
     if (this.recorder?.state === 'recording') { try { this.recorder.stop(); } catch {} }
@@ -984,7 +1055,7 @@ export class LineRecorder {
     this.updateControls();
   }
   clearTake() {
-    this.takeGeneration++; this.takeSamples = null; this.takeDuration = 0; this.takeSampleRate = 0;
+    this.takeGeneration++; this.takeSamples = null; this.takeDuration = 0; this.takeSampleRate = 0; this.localTiming = null;
     if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
     this.blob = null; this.objectUrl = null; this.savedTake = null; this.savedBlob = null;
     this.review.pause(); this.review.removeAttribute('src');
@@ -1013,7 +1084,7 @@ export class LineRecorder {
           try {
             const body = new FormData();
             body.append('take', blob, 'voice.' + (blob.type.includes('ogg') ? 'ogg' : blob.type.includes('mp4') ? 'm4a' : 'webm'));
-            const snapshot = await this.client.request('/api/takes/' + encodeURIComponent(lineId), body, { multipart: true, retakeId: this.retakeId });
+            const snapshot = await this.client.request('/api/takes/' + encodeURIComponent(lineId), body, { multipart: true, retakeId: this.retakeId, takeTiming: this.localTiming });
             if (generation !== this.generation || !this.allowed || this.blob !== blob) return null;
             const take = this.retakeId ? snapshot.session.replacementTakes?.[lineId] : snapshot.session.lineTakes[lineId];
             if (!take || take.status !== 'recorded' || take.playerId !== this.client.state?.viewer.playerId) return null;
