@@ -821,3 +821,32 @@ test('WebSocket reconnect yields authoritative personal state and disconnect lea
   assert.equal(state.data.queue.pendingLines.length, 3);
   await uploadAccepted(host, player, '01_alice'); // HTTP recording works without a live socket.
 });
+
+test('WebSocket notifies existing players immediately when a pack is chosen and a role is claimed', async t => {
+  const host = await startFixtureRuntime(t);
+  const party = await host.admin('/api/admin/create-party', {});
+  assert.equal(party.status, 200);
+  const player = await host.join(party.data.session, 'Early arrival');
+  const socket = new WebSocket(host.base.replace('http:', 'ws:') + '/ws?viewer=player', {
+    headers: { Cookie: player.cookie },
+  });
+  t.after(() => { if (socket.readyState !== WebSocket.CLOSED) socket.close(); });
+  const initial = await waitSocketState(socket, state => state.type === 'state' && state.viewer?.playerId === player.id);
+  assert.equal(initial.session.pack, null);
+  const packs = await host.admin('/api/admin/packs');
+  const packId = packs.data.packs[0].id;
+  const selectionUpdate = waitSocketState(socket, state => state.session?.pack?.id === packId);
+  const chosen = await host.admin('/api/admin/select', { packId, partyId: party.data.session.id });
+  assert.equal(chosen.status, 200);
+  const selectedOnClient = await selectionUpdate;
+  assert.equal(selectedOnClient.session.state, 'lobby');
+  assert.equal(selectedOnClient.queue.lines.length, 0);
+  const claimUpdate = waitSocketState(socket, state => state.session?.roleAssignments?.Alice === player.id);
+  const claimed = await host.request('/api/player/claim', {
+    method: 'POST', token: player.token,
+    body: { matchId: chosen.data.session.matchId, character: 'Alice' },
+  });
+  assert.equal(claimed.status, 200);
+  assert.deepEqual((await claimUpdate).queue.assignedCharacters, ['Alice']);
+  assert.equal((await host.admin('/api/state')).data.session.roleAssignments.Alice, player.id);
+});

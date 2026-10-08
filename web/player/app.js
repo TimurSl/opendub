@@ -2,6 +2,7 @@ import { RuntimeClient, node } from '../shared/api.js';
 import { LineRecorder } from '../recorder/recorder.js';
 import { DubPlayback } from '../playback/playback.js';
 import { canRecordSelectedLine } from './eligibility.js';
+import { roleView } from './view-state.js';
 
 const $ = id => document.getElementById(id);
 const client = new RuntimeClient('player');
@@ -228,7 +229,10 @@ function render(snapshot) {
   const line = pack?.lines.find(item => item.id === selectedLineId);
   const finalPlayback = session.state === 'playback';
   const hasUnfinishedRequiredLine = session.completedLineCount < session.totalLineCount;
-  const needsReady = (session.state === 'assignment' && hasTasks) || (session.state === 'recording' && hasTasks && hasUnfinishedRequiredLine && !prepared);
+  const { needsReady, showRoles, canPick, canReady } = roleView({
+    state: session.state, hasPack: !!pack, lineMode, hasTasks, prepared,
+    incomplete: hasUnfinishedRequiredLine, rolesLocked: session.rolesLocked,
+  });
   const recordingLine = ['recording', 'review', 'paused'].includes(session.state) && !!line && hasTasks;
   const recording = recordingLine && !needsReady;
   const ownedActiveRetake = line && session.activeRetakes?.find(item => item.lineId === line.id && item.playerId === snapshot.viewer.playerId);
@@ -242,10 +246,10 @@ function render(snapshot) {
   $('join-panel').hidden = true; $('room-panel').hidden = false;
   $('pack-title').textContent = pack?.metadata.title || 'Your party';
   $('pack-title').parentElement.hidden = finalPlayback;
-  $('role-panel').hidden = !needsReady;
+  $('role-panel').hidden = !showRoles;
   $('recording-panel').hidden = !recording;
   $('playback-panel').hidden = !finalPlayback;
-  $('waiting-panel').hidden = needsReady || recording || finalPlayback;
+  $('waiting-panel').hidden = showRoles || recording || finalPlayback;
   const showLineNavigation = hasTasks && ['recording', 'review', 'paused'].includes(session.state);
   $('line-navigation').hidden = !showLineNavigation;
   const picker = $('line-picker'); const selectedWasFocused = document.activeElement === picker;
@@ -285,7 +289,7 @@ function render(snapshot) {
     $('line-caption').textContent = line.caption;
     if (visibleMode !== 'recording') requestAnimationFrame(() => recorder.drawWaveform());
   } else $('line-number').hidden = true;
-  if (needsReady) {
+  if (showRoles) {
     $('role-title').textContent = lineMode ? 'Check your line assignments' : 'Choose your characters';
     $('character-options').hidden = lineMode;
     $('line-setup-summary').hidden = !lineMode;
@@ -298,8 +302,9 @@ function render(snapshot) {
       $('assigned-character-summary').textContent = characters.length ? `Characters: ${characters.map(character => `${character} (${assigned.filter(item => item.character === character).length})`).join(' · ')}` : 'The host will deal lines among connected players.';
       $('role-counts').textContent = `${assigned.length} assigned lines · ${characters.length} ${characters.length === 1 ? 'character' : 'characters'}`;
     } else {
-      renderCharacterOptions(snapshot, session.state === 'assignment' && !session.rolesLocked);
+      renderCharacterOptions(snapshot, canPick);
       renderAssignedCharacters(queue?.assignedCharacters || [], pack);
+      if (session.state === 'lobby') $('role-help').textContent = 'Choose your characters now. READY opens after the host finishes setup.';
     }
     $('role-help').textContent = lineMode
       ? 'Review your assigned lines and character summaries, then check your microphone.'
@@ -307,7 +312,7 @@ function render(snapshot) {
     $('role-key-help').textContent = lineMode
       ? 'Use Tab to review your line summary and microphone controls.'
       : 'Use Tab and Enter to choose characters or check your microphone.';
-    $('ready').disabled = readyBusy || !hasTasks;
+    $('ready').disabled = readyBusy || !canReady;
     $('ready').setAttribute('aria-pressed', String(prepared));
     $('microphone-status').textContent = prepared ? 'Microphone ready. You can wait for the host.' : microphoneReady() ? 'Microphone connected. Press READY to confirm.' : 'Allow microphone access, then press READY.';
   }
@@ -321,8 +326,9 @@ function render(snapshot) {
     $('waiting-title').textContent = 'Paused'; $('waiting-message').textContent = 'Waiting for the host to continue.';
   } else if (session.state === 'review') {
     $('waiting-title').textContent = 'Waiting for the host'; $('waiting-message').textContent = 'The host is reviewing the recordings.';
-  } else if (session.state === 'lobby' && !pack) {
-    $('waiting-title').textContent = 'Party is ready'; $('waiting-message').textContent = 'The host will choose a pack. Stay on this page for the next match.';
+  } else if (session.state === 'lobby') {
+    $('waiting-title').textContent = pack ? 'Pack selected' : 'Party is ready';
+    $('waiting-message').textContent = pack ? 'The host is finishing setup. Roles will open when the host enables picking.' : 'The host will choose a pack. Stay on this page for the next match.';
   } else if (!hasTasks && session.state !== 'lobby') {
     $('waiting-title').textContent = lineMode ? 'Waiting for lines' : 'Waiting for your characters';
     $('waiting-message').textContent = lineMode ? 'You have no lines yet. Your host can deal lines or assign them to you. You do not need to enable your microphone.' : 'Your host will assign your characters.';
@@ -330,7 +336,7 @@ function render(snapshot) {
     $('waiting-title').textContent = 'Waiting for the host'; $('waiting-message').textContent = 'The host will start recording soon.';
   }
   playback.setState(snapshot);
-  const nextMode = finalPlayback ? 'playback' : needsReady ? 'roles' : recording ? 'recording' : 'waiting';
+  const nextMode = finalPlayback ? 'playback' : showRoles ? 'roles' : recording ? 'recording' : 'waiting';
   const changed = visibleMode !== nextMode; visibleMode = nextMode;
   if (changed) requestAnimationFrame(() => {
     if (visibleMode !== nextMode) return;
@@ -350,4 +356,3 @@ document.addEventListener('keydown', event => {
 });
 
 client.start().catch(() => { /* New visitors join with the host invitation. */ });
-window.addEventListener('focus', () => { if (client.state) client.request('/api/state?viewer=player').catch(() => {}); });

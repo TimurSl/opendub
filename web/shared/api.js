@@ -2,7 +2,7 @@ export class RuntimeClient extends EventTarget {
   constructor(viewer) {
     super(); this.viewer = viewer; this.state = null; this.socket = null; this.clockOffset = 0;
     this.bestRtt = Infinity; this.reconnectTimer = null; this.pingSent = 0;
-    this.active = false;
+    this.active = false; this.refreshInFlight = null;
   }
   async request(path, body, { multipart = false, method, retakeId, takeTiming } = {}) {
     const matchId = this.state?.session?.matchId;
@@ -59,13 +59,27 @@ export class RuntimeClient extends EventTarget {
     this.state = next; this.dispatchEvent(new CustomEvent('state', { detail: next }));
   }
   serverNow() { return Date.now() + this.clockOffset; }
+  refresh() {
+    if (this.refreshInFlight) return this.refreshInFlight;
+    const refreshing = this.request(`/api/state?viewer=${this.viewer}`);
+    this.refreshInFlight = refreshing;
+    // Never hold a failed or completed refresh as the next request's result.
+    void refreshing.finally(() => { if (this.refreshInFlight === refreshing) this.refreshInFlight = null; }).catch(() => {});
+    return refreshing;
+  }
   async start() {
-    await this.request(`/api/state?viewer=${this.viewer}`);
+    await this.refresh();
     if (this.active) return;
     this.active = true; this.connect();
     this.pollTimer = setInterval(() => {
-      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) this.request(`/api/state?viewer=${this.viewer}`).catch(() => {});
-    }, 10000);
+      // Reconcile even on an OPEN socket: a broken proxy can lose WS updates
+      // without immediately closing the connection.
+      this.refresh().catch(() => {});
+    }, 8000);
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) this.refresh().catch(() => {});
+    });
+    if (typeof window !== 'undefined') window.addEventListener('focus', () => this.refresh().catch(() => {}));
   }
   connect() {
     if (!this.active) return;
@@ -73,11 +87,13 @@ export class RuntimeClient extends EventTarget {
     const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws?viewer=${this.viewer}`);
     this.socket = socket;
     socket.addEventListener('open', () => {
+      if (this.socket !== socket) return;
       this.dispatchEvent(new CustomEvent('connection', { detail: true })); this.ping();
       this.pingTimer = setInterval(() => this.ping(), 10000);
-      this.request(`/api/state?viewer=${this.viewer}`).catch(() => {});
+      this.refresh().catch(() => {});
     });
     socket.addEventListener('message', event => {
+      if (this.socket !== socket) return;
       try {
         const message = JSON.parse(event.data);
         if (message.type === 'state') this.receive(message);
@@ -92,6 +108,8 @@ export class RuntimeClient extends EventTarget {
     });
     socket.addEventListener('error', () => socket.close());
     socket.addEventListener('close', () => {
+      if (this.socket !== socket) return;
+      this.socket = null;
       clearInterval(this.pingTimer);
       this.dispatchEvent(new CustomEvent('connection', { detail: false }));
       if (this.active) this.reconnectTimer = setTimeout(() => this.connect(), 2000);

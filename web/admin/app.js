@@ -2,6 +2,7 @@ import { RuntimeClient, node, showError, setBusy } from '../shared/api.js';
 import { DubPlayback } from '../playback/playback.js';
 import { filterPacks } from './pack-filters.js';
 import { PendingButtons } from './pending-buttons.js';
+import { currentStage, reconcileStage } from './stage.js';
 
 const $ = id => document.getElementById(id);
 const client = new RuntimeClient('admin');
@@ -17,7 +18,7 @@ const publicLinkReady = fetch('/api/config', { credentials: 'same-origin', cache
   .catch(() => {});
 const roleViews = new Map(); const takeRows = new Map(); const pendingButtons = new PendingButtons(); const pendingActionPaths = new Set();
 let selectedPackId = null; let selectedRoomId = null; let selectedMatchId = null; let activePackList = [];
-let viewedStage = null; let renderedPackListKey = null;
+let viewedStage = null; let previousProgressStage = null; let renderedPackListKey = null;
 
 function beginPending(button, label = 'Working…') {
   return pendingButtons.begin(button, label);
@@ -35,7 +36,12 @@ async function action(path, body = {}, button) {
   if (path === 'select') renderPackList(true);
   $('error').hidden = true;
   try { return await client.request(`/api/admin/${path}`, body); }
-  catch (problem) { error(problem); throw problem; }
+  catch (problem) {
+    // A stale form (e.g. another host action advanced the phase) must refresh
+    // before offering the same now-invalid controls again.
+    if (problem.status === 409 || problem.status === 403) await client.refresh().catch(() => {});
+    error(problem); throw problem;
+  }
   finally { pendingActionPaths.delete(path); endPending(button); }
 }
 function readSessionSettings() {
@@ -82,7 +88,7 @@ $('back-to-setup').addEventListener('click', () => {
 });
 document.querySelector('.stage-nav').addEventListener('click', event => {
   const button = event.target.closest('[data-stage]');
-  if (!button) return;
+  if (!button || button.disabled) return;
   viewedStage = Number(button.dataset.stage);
   if (client.state) render(client.state);
 });
@@ -239,10 +245,6 @@ async function refreshPacks() {
   } finally { button.disabled = false; }
 }
 
-function currentStage(session) {
-  if (!session.partyCreated || !session.pack) return 1;
-  return ({ lobby: 2, assignment: 3, recording: 4, paused: 4, review: 5, playback: 6 })[session.state] || 2;
-}
 function showStage(stage, progressStage, session) {
   const names = ['packs', 'setup', 'roles', 'recording', 'review', 'playback'];
   names.forEach((name, index) => { $(`screen-${name}`).hidden = index + 1 !== stage; });
@@ -251,7 +253,7 @@ function showStage(stage, progressStage, session) {
     const button = $(`stage-button-${index}`);
     item.classList.toggle('is-current', index === stage);
     item.classList.toggle('is-complete', index < progressStage);
-    button.disabled = progressStage === 1 && index !== 1;
+    button.disabled = index > progressStage || (index === 1 && session.state !== 'lobby');
     if (index === stage) button.setAttribute('aria-current', 'step'); else button.removeAttribute('aria-current');
   }
   $('stage-heading').textContent = stage === 1 && !session.partyCreated ? 'Create party' : ['Choose a pack', 'Set up your session', 'Choose roles', 'Recording progress', 'Review the takes', 'Final playback'][stage - 1];
@@ -262,8 +264,11 @@ function render(snapshot) {
   $('login-panel').hidden = true; $('admin-panel').hidden = false;
   const partyChanged = selectedRoomId !== session.id;
   const matchChanged = selectedMatchId !== session.matchId;
+  const progressStage = currentStage(session);
+  viewedStage = reconcileStage(viewedStage, previousProgressStage, progressStage, partyChanged || matchChanged);
+  previousProgressStage = progressStage;
   if (partyChanged || matchChanged) {
-    viewedStage = null; roleViews.clear(); takeRows.clear();
+    roleViews.clear(); takeRows.clear();
     ['roles', 'recording-roles', 'takes'].forEach(id => $(id).replaceChildren());
     $('export-status').textContent = '';
   }
@@ -282,14 +287,12 @@ function render(snapshot) {
     $('room-code').textContent = session.id.slice(0, 6).toUpperCase();
   }
   if (!pack) {
-    viewedStage = 1;
     showStage(1, 1, session);
     renderPacksIfNeeded();
     playback.setState(snapshot);
     renderPendingButtons();
     return;
   }
-  const progressStage = currentStage(session);
   const stage = viewedStage ?? progressStage;
   showStage(stage, progressStage, session);
   $('change-pack').hidden = !session.pack || session.state !== 'lobby';

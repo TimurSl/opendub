@@ -225,6 +225,13 @@ export class SessionStore extends EventEmitter {
     if (options.gameMode !== "character" && options.gameMode !== "line") fail("Invalid game mode");
     const max = options.maxRolesPerPlayer;
     if (!Number.isInteger(max) || max < 0 || max > (this.pack?.characters.length ?? 1000)) fail("Invalid maximum roles per player");
+    if (this.data.options.gameMode !== options.gameMode) {
+      // Players may already have claimed characters while the host is in setup.
+      // A switch to/from Line mode must not resurrect those claims later.
+      this.data.roleAssignments = record({});
+      this.data.lineAssignments = record({});
+      this.data.readyPlayers = record({});
+    }
     this.data.options = { ...this.data.options, ...options };
     if (!this.data.options.allowMultipleRoles && this.data.options.maxRolesPerPlayer > 1) this.data.options.maxRolesPerPlayer = 1;
   }
@@ -242,7 +249,6 @@ export class SessionStore extends EventEmitter {
     if (!this.pack?.characters.includes(character)) fail("Unknown character", 404);
     if (!this.findPlayer(playerId)) fail("Unknown player", 404);
     if (this.data.state === "playback") fail("Stop playback before reassigning", 409);
-    if (this.data.state === "lobby") fail("Open role selection before assigning characters", 409);
     if (this.data.roleAssignments[character] !== playerId) {
       if (this.data.state === "assignment") this.data.rolesLocked = false;
       for (const line of this.pack.lines.filter(line => line.character === character)) {
@@ -318,7 +324,7 @@ export class SessionStore extends EventEmitter {
     if (this.data.options.gameMode !== "character") fail("Character assignment is unavailable in Line mode", 409);
     if (!this.pack?.characters.includes(character)) fail("Unknown character", 404);
     if (!this.findPlayer(playerId)) fail("Unknown player", 404);
-    if (this.data.state !== "assignment" || this.data.rolesLocked) fail("Role selection is locked", 409);
+    if (!["lobby", "assignment"].includes(this.data.state) || this.data.rolesLocked) fail("Role selection is locked", 409);
     if (!this.data.options.freeRolePicking) fail("The host is assigning roles", 403);
     const owner = this.data.roleAssignments[character];
     if (owner === playerId) return;
@@ -330,7 +336,7 @@ export class SessionStore extends EventEmitter {
   releaseRole(character, playerId) {
     if (this.data.options.gameMode !== "character") fail("Character assignment is unavailable in Line mode", 409);
     if (!this.pack?.characters.includes(character)) fail("Unknown character", 404);
-    if (this.data.state !== "assignment" || this.data.rolesLocked) fail("Role selection is locked", 409);
+    if (!["lobby", "assignment"].includes(this.data.state) || this.data.rolesLocked) fail("Role selection is locked", 409);
     if (!this.data.options.freeRolePicking) fail("The host is assigning roles", 403);
     if (this.data.roleAssignments[character] !== playerId) fail("That character is not yours", 403);
     this.unassignRole(character);
@@ -338,7 +344,7 @@ export class SessionStore extends EventEmitter {
   unassignRole(character) {
     if (this.data.options.gameMode !== "character") fail("Character assignment is unavailable in Line mode", 409);
     if (!this.pack?.characters.includes(character)) fail("Unknown character", 404);
-    if (this.data.state === "playback" || this.data.state === "lobby") fail("Roles cannot be changed now", 409);
+    if (!["lobby", "assignment", "recording", "review", "paused"].includes(this.data.state)) fail("Roles cannot be changed now", 409);
     const previousOwner = this.data.roleAssignments[character];
     if (!previousOwner) return;
     if (this.data.state === "assignment") this.data.rolesLocked = false;
@@ -555,6 +561,11 @@ export class SessionStore extends EventEmitter {
         for (const [lineId, retake] of Object.entries(this.data.activeRetakes)) if (retake.playerId === playerId) this.cancelRetake(lineId);
         this.completionPhase();
       });
-    } else this.emit("change");
+    } else {
+      // Presence is part of the public snapshot. Version it like all other
+      // visible changes so an older HTTP response cannot undo a WS update.
+      this.revision++;
+      this.emit("change");
+    }
   }
 }

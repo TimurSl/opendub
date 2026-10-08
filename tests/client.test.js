@@ -36,3 +36,27 @@ test('a state broadcast wins over an older action response that completes afterw
   await action;
   assert.equal(client.state.session.matchId, 'match-two');
 });
+
+test('state refreshes are coalesced and cannot overwrite a newer WebSocket broadcast', async t => {
+  const client = new RuntimeClient('player');
+  client.receive(snapshot('server-a', 4, 'party', 'match-a'));
+  const originalFetch = globalThis.fetch;
+  let completeFetch;
+  let calls = 0;
+  globalThis.fetch = () => { calls++; return new Promise(resolve => { completeFetch = resolve; }); };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const first = client.refresh();
+  const second = client.refresh();
+  assert.equal(calls, 1);
+  assert.strictEqual(first, second);
+  client.receive(snapshot('server-a', 6, 'party', 'match-b'));
+  completeFetch({ ok: true, json: async () => snapshot('server-a', 5, 'party', 'match-a') });
+  await Promise.all([first, second]);
+  assert.equal(client.state.session.matchId, 'match-b');
+  await new Promise(resolve => setImmediate(resolve));
+  const third = client.refresh();
+  assert.equal(calls, 2, 'completed refresh allows the next reconciliation');
+  completeFetch({ ok: true, json: async () => snapshot('server-a', 7, 'party', 'match-c') });
+  await third;
+  assert.equal(client.state.session.matchId, 'match-c');
+});
