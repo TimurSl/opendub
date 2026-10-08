@@ -6,21 +6,18 @@ import https from "node:https";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { timingSafeEqual, createHash } from "node:crypto";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { isIP } from "node:net";
 import { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack } from "./workshop/parser.js";
 import { SessionStore, fail, randomId } from "./session/store.js";
 import { parseCustomAudioArgs, runCustomAudio } from "./custom-audio.js";
 import { soundpadFormat, checkSoundpadFile, runSoundpadAudio } from "./soundpad-audio.js";
+import { downloadWorkshopItem, workshopItemId } from "./workshop/downloader.js";
+import { secureEquals, initializeAdminToken, readAdminToken, tokenFile, parseWireGuardCidrs, wireGuardAddressAllowed } from "./admin-auth.js";
 export { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack, SessionStore };
 
 const webDir = fileURLToPath(new URL("../web", import.meta.url));
-function equalToken(left, right) {
-  if (typeof left !== "string" || typeof right !== "string") return false;
-  const a = Buffer.from(left), b = Buffer.from(right);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
 function local(req) {
   return ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress);
 }
@@ -181,7 +178,20 @@ export async function createRuntime(options = {}) {
   const port = Number(options.port ?? process.env.PORT ?? 7373);
   const publicLink = publicOrigin(options.publicLink ?? process.env.PUBLIC_LINK);
   const trustedProxy = trustedProxyAddresses(options.trustedProxy ?? process.env.TRUSTED_PROXY);
-  const adminToken = options.adminToken ?? process.env.ADMIN_TOKEN ?? randomId(32);
+  const tokenOverride = options.adminToken ?? process.env.ADMIN_TOKEN;
+  const adminTokenFilename = tokenFile(dataDir);
+  const adminToken = tokenOverride ?? await initializeAdminToken(adminTokenFilename);
+  const currentAdminToken = () => tokenOverride ?? readAdminToken(adminTokenFilename);
+  const wireGuardCidrs = parseWireGuardCidrs(options.wgAdminCidrs ?? process.env.WG_ADMIN_CIDRS ?? '');
+  const clientAddress = req => {
+    const direct = normalizedAddress(req.socket.remoteAddress);
+    if (!trustedProxy.has(direct)) return direct;
+    // Proxy MUST overwrite X-Real-IP, never append a user-controlled value.
+    const realIp = req.headers['x-real-ip'];
+    if (typeof realIp !== 'string') return direct;
+    return normalizedAddress(realIp.trim());
+  };
+  const wireGuardAdmin = req => wireGuardAddressAllowed(clientAddress(req), wireGuardCidrs);
   const maxUploadBytes = Number(options.maxUploadBytes ?? Number(process.env.MAX_UPLOAD_MB ?? 25) * 1024 * 1024);
   const previewBefore = Number(options.previewBefore ?? process.env.PREVIEW_BEFORE ?? 1.5);
   const previewAfter = Number(options.previewAfter ?? process.env.PREVIEW_AFTER ?? 0.5);
@@ -189,6 +199,7 @@ export async function createRuntime(options = {}) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("PORT must be 0–65535");
   if (!Number.isSafeInteger(maxUploadBytes) || maxUploadBytes < 16 || maxUploadBytes > 1024 * 1024 * 1024) throw new Error("Invalid upload byte limit");
   if (![previewBefore, previewAfter].every(value => Number.isFinite(value) && value >= 0 && value <= 30)) throw new Error("Preview padding must be 0–30 seconds");
+  await fs.mkdir(workshopDir, { recursive: true, mode: 0o700 });
   const discovered = await discoverPacks(workshopDir);
   const store = await new SessionStore({ packs: discovered.packs, dataDir, previewBefore, previewAfter }).init();
   const exportDirectory = path.join(dataDir, "exports");
@@ -198,6 +209,9 @@ export async function createRuntime(options = {}) {
   const transcodeVideo = options.transcodeVideo ?? process.env.TRANSCODE_VIDEO === "1";
   const ffmpegPath = options.ffmpegPath ?? process.env.FFMPEG_PATH ?? "ffmpeg";
   let activeCustomAudioJobs = 0;
+  const steamcmdPath = options.steamcmdPath ?? process.env.STEAMCMD_PATH ?? '';
+  const steamcmdDir = path.resolve(options.steamcmdDir ?? process.env.STEAMCMD_DIR ?? path.join(dataDir, 'steamcmd'));
+  let workshopJob = null;
   if (transcodeVideo && store.pack) await transcode(store.pack, dataDir, ffmpegPath);
   const app = express();
   app.disable("x-powered-by");
@@ -212,7 +226,8 @@ export async function createRuntime(options = {}) {
     const cookie = cookies(req);
     const bearer = /^Bearer ([A-Za-z0-9_-]+)$/.exec(req.headers.authorization ?? "")?.[1];
     const viewerPreference = new URL(req.url, "http://runtime.local").searchParams.get("viewer");
-    const adminMatches = equalToken(bearer ?? cookie.dub_admin, adminToken);
+    const adminMatches = secureEquals(bearer ?? cookie.dub_admin, currentAdminToken());
+    const wgAdmin = wireGuardAdmin(req);
     const player = store.findToken(bearer ?? cookie.dub_player);
     const kind = requireKind ?? viewerPreference;
     if (kind === "player") {
@@ -221,12 +236,10 @@ export async function createRuntime(options = {}) {
       fail("Join the room first", 401);
     }
     if (kind === "admin") {
-      if (!adminMatches) fail("Admin authorization required", player ? 403 : 401);
-      if (!local(req)) fail("Admin interface is available only on the host PC", 403);
+      if (!adminMatches && !wgAdmin) fail("Admin authorization required", player ? 403 : 401);
       return { kind: "admin" };
     }
-    if (adminMatches) {
-      if (!local(req)) fail("Admin interface is available only on the host PC", 403);
+    if (adminMatches || (wgAdmin && !player)) {
       return { kind: "admin" };
     }
     if (player) return { kind: "player", playerId: player.id };
@@ -236,10 +249,10 @@ export async function createRuntime(options = {}) {
   const snapshot = (req, res) => res.json(store.snapshot(req.viewer));
   const setCookie = (req, res, name, token) => res.cookie(name, token, { httpOnly: true, sameSite: "strict", secure: requestProtocol(req, trustedProxy) === "https:", path: "/", maxAge: 30 * 24 * 60 * 60 * 1000 });
   app.post("/api/admin/login", async (req, res) => {
-    if (!local(req)) fail("Admin login is available only on the host PC", 403);
+    if (requestProtocol(req, trustedProxy) !== "https:" && !local(req) && !wireGuardAdmin(req)) fail("Use HTTPS for admin login", 403);
     const { token } = validateBody(req, { token: "string" });
-    if (!equalToken(token, adminToken)) fail("Invalid admin token", 401);
-    setCookie(req, res, "dub_admin", adminToken);
+    if (!secureEquals(token, currentAdminToken())) fail("Invalid admin token", 401);
+    setCookie(req, res, "dub_admin", currentAdminToken());
     res.json(store.snapshot({ kind: "admin" }));
   });
   app.get("/api/admin/packs", authenticated("admin"), async (req, res) => {
@@ -248,6 +261,34 @@ export async function createRuntime(options = {}) {
     discovered.errors = refreshed.errors;
     store.packs = new Map(refreshed.packs.map(pack => [pack.id, pack]));
     res.json({ packs: discovered.packs.map(pack => ({ id: pack.id, metadata: pack.metadata, characters: pack.characters, characterLineCounts: pack.characterLineCounts, lineCount: pack.lines.length, characterCount: pack.characters.length, iconUrl: pack.icon ? `/api/admin/packs/${encodeURIComponent(pack.id)}/icon` : null })), errors: discovered.errors });
+  });
+  app.get('/api/admin/workshop/status', authenticated('admin'), (req, res) => {
+    res.json({ enabled: !!steamcmdPath, job: workshopJob });
+  });
+  app.post('/api/admin/workshop/download', authenticated('admin'), (req, res) => {
+    const { item } = validateBody(req, { item: 'string' });
+    if (!steamcmdPath) fail('Workshop downloader is disabled: configure STEAMCMD_PATH', 503);
+    if (workshopJob?.status === 'running') fail('Another Workshop download is running', 409);
+    const id = workshopItemId(item);
+    workshopJob = { id, status: 'running', startedAt: Date.now() };
+    const job = workshopJob;
+    // Async job: reverse proxy/browser request timeouts cannot interrupt the download.
+    void (async () => {
+      try {
+        const result = await downloadWorkshopItem({ itemId: id, steamcmdPath, steamcmdDir, workshopDir, username: options.steamcmdUsername ?? process.env.STEAMCMD_USERNAME ?? 'anonymous',
+          beforePublish: target => { if (store.pack?.directory === target) fail('Cannot update the pack while it is selected in an active match', 409); } });
+        const refreshed = await discoverPacks(workshopDir);
+        discovered.packs = refreshed.packs;
+        discovered.errors = refreshed.errors;
+        store.packs = new Map(refreshed.packs.map(pack => [pack.id, pack]));
+        // Keep an in-progress session pinned to the previous object until the
+        // next match, so downloading an update never changes its media mid-game.
+        job.status = 'done'; job.packId = result.pack.id;
+      } catch (error) {
+        job.status = 'error'; job.error = String(error.message).slice(0, 400);
+      } finally { job.finishedAt = Date.now(); }
+    })();
+    res.status(202).json({ job });
   });
   app.get("/api/admin/packs/:packId/icon", authenticated("admin"), async (req, res) => {
     const pack = store.packs.get(req.params.packId);
@@ -585,7 +626,7 @@ export async function createRuntime(options = {}) {
   app.use((req, res, next) => {
     let requested;
     try { requested = path.posix.normalize(decodeURIComponent(req.path)); } catch { return res.status(400).send("Invalid request path."); }
-    if ((requested === "/admin" || requested === "/admin.html" || requested.startsWith("/admin/")) && !local(req)) return res.status(403).send("Admin interface is available only on the host PC.");
+    // The login form is public, but all host APIs require a token or trusted WireGuard source.
     next();
   });
   app.get(["/admin", "/admin/"], (req, res) => res.sendFile(path.join(webDir, "admin.html")));
@@ -615,6 +656,8 @@ export async function createRuntime(options = {}) {
   });
   websocket.on("connection", (ws, req, viewer) => {
     ws.viewer = viewer;
+    ws.wgAdmin = viewer.kind === 'admin' && wireGuardAdmin(req);
+    ws.adminCredential = viewer.kind === 'admin' ? (/^Bearer ([A-Za-z0-9_-]+)$/.exec(req.headers.authorization ?? '')?.[1] ?? cookies(req).dub_admin) : null;
     ws.alive = true;
     ws.on("pong", () => { ws.alive = true; });
     ws.roomId = store.data.id;
@@ -629,9 +672,11 @@ export async function createRuntime(options = {}) {
     ws.on("error", () => {});
     ws.on("close", () => { if (viewer.kind === "player" && ws.roomId === store.data.id) store.presence(viewer.playerId, -1).catch(() => {}); });
   });
+  const adminSocketAuthorized = ws => ws.viewer.kind !== 'admin' || ws.wgAdmin || secureEquals(ws.adminCredential, currentAdminToken());
   const broadcast = () => {
     for (const ws of websocket.clients) {
       if (ws.readyState !== WebSocket.OPEN) continue;
+      if (!adminSocketAuthorized(ws)) { ws.close(1008, "Admin token revoked"); continue; }
       if (ws.viewer.kind === "player" && (ws.roomId !== store.data.id || !store.findPlayer(ws.viewer.playerId))) { ws.close(1008, "Room changed"); continue; }
       if (ws.bufferedAmount > 2 * 1024 * 1024) { ws.close(1008, "Client is too slow"); continue; }
       ws.send(JSON.stringify(store.snapshot(ws.viewer)));
@@ -640,6 +685,7 @@ export async function createRuntime(options = {}) {
   store.on("change", broadcast);
   const heartbeat = setInterval(() => {
     for (const ws of websocket.clients) {
+      if (!adminSocketAuthorized(ws)) { ws.close(1008, "Admin token revoked"); continue; }
       if (!ws.alive) { ws.terminate(); continue; }
       ws.alive = false;
       if (ws.readyState === WebSocket.OPEN) ws.ping();
@@ -688,9 +734,9 @@ async function main() {
   const protocol = process.env.TLS_CERT ? "https" : "http";
   console.log("Open Dub Runtime listening on " + protocol + "://0.0.0.0:" + address.port);
   console.log("Local admin: " + protocol + "://localhost:" + address.port + "/admin");
-  console.log("Admin token: " + runtime.adminToken);
+  console.log("Admin token: run opendub-auth --data-dir " + (options.dataDir ?? process.env.DATA_DIR ?? "./data") + " (never logged)");
   console.log("LAN microphones need trusted HTTPS. See README.md.");
-  if (!runtime.sessionStore.packs.size) console.log("No packs found. Configure WORKSHOP_DIR and restart.");
+  if (!runtime.sessionStore.packs.size) console.log("No packs found. Configure WORKSHOP_DIR or use Workshop downloader.");
   for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => { await runtime.close(); process.exit(0); });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main().catch(error => { console.error(error.message); process.exitCode = 1; });

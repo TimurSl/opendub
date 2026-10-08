@@ -1,0 +1,21 @@
+#!/usr/bin/env node
+import path from 'node:path';
+import { initializeAdminToken, readAdminToken, rotateAdminToken, tokenFile } from '../server/admin-auth.js';
+
+let dataDir = process.env.DATA_DIR || './data';
+let operation = 'show';
+const args = process.argv.slice(2);
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--data-dir' && args[i + 1]) dataDir = args[++i];
+  else if (args[i] === '--rotate') operation = 'rotate';
+  else if (args[i] === '--init') operation = 'init';
+  else if (args[i] === '--help' || args[i] === '-h') {
+    console.log('Usage: opendub-auth [--data-dir PATH] [--init | --rotate]\nDisplays the host studio token. --init creates it when absent; --rotate invalidates existing admin sessions immediately.\nKeep the token secret; run as the Open Dub service user.');
+    process.exit(0);
+  } else { console.error('Unknown argument:', args[i]); process.exit(2); }
+}
+const filename = tokenFile(path.resolve(dataDir));
+try {
+  const token = operation === 'rotate' ? await rotateAdminToken(filename) : operation === 'init' ? await initializeAdminToken(filename) : readAdminToken(filename);
+  process.stdout.write(token + '\n');
+} catch (error) { console.error('opendub-auth:', error.message); process.exitCode = 1; }

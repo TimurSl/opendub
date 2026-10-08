@@ -1,3 +1,5 @@
+> **Legacy desktop proxy mode.** For a standalone VPS, use [NixOS Standalone](NIXOS_STANDALONE.md) instead. Public admin access is now possible with `opendub-auth` tokens; the old local-only statements below refer to a former security restriction. Do **not** enable `WG_ADMIN_CIDRS` on a proxy that passes untrusted client headers.
+
 # Desktop + VPS as Proxy
 
 Run gameplay, Workshop discovery, and recording storage on your desktop. Use your existing WireGuard tunnel to let Nginx on the VPS expose the player app through public HTTPS. The VPS forwards traffic; it does not understand packs, lines, or session rules and does not store pack files or takes.
@@ -63,7 +65,7 @@ npm start
 
 Substitute your VPS's actual WireGuard source IP for `10.77.0.1`. On the VPS, `ip route get 10.77.0.3` reports the `src` address used for the upstream connection. `10.77.0.3` is the desktop's destination address, so it does not belong in `TRUSTED_PROXY`. Restart the runtime after changing its environment. `PUBLIC_LINK` sets the copied invitation origin and does not authorize forwarded headers.
 
-`TRUSTED_PROXY` accepts exact IPv4 or IPv6 addresses separated by commas. Trust applies only to the socket's directly connected peer. Requests from other sources continue to use the actual transport scheme even when they send forwarded headers. Native TLS connections always use HTTPS. Admin access still requires an actual loopback source address and the separate admin token.
+`TRUSTED_PROXY` accepts exact IPv4 or IPv6 addresses separated by commas. Trust applies only to the socket's directly connected peer. Requests from other sources continue to use the actual transport scheme even when they send forwarded headers. Native TLS connections always use HTTPS. Admin access requires the admin token unless a source belongs to an explicitly configured WireGuard admin CIDR.
 
 Add `TRANSCODE_VIDEO=1` if browser compatibility requires the optional whole-video MP4 cache and ffmpeg is installed. Keep the process running while the room is active. Open `http://localhost:7373/admin` on the desktop to manage the room; public players use the HTTPS invitation.
 
@@ -157,7 +159,7 @@ services.nginx.virtualHosts."dub.zenisoft.net.ua" = {
 
 The explicit location setting `recommendedProxySettings = false` prevents NixOS from adding its recommended proxy headers alongside the manual headers shown above, even if `services.nginx.recommendedProxySettings` is enabled globally. Keep `proxyWebsockets = true` and the manual Host and protocol headers. Alternatively, enable the recommended settings for this location and remove every manually supplied header already defined by them: Host, `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`, and `X-Forwarded-Server`. Keep your existing ACME email/terms settings, firewall configuration, and unrelated virtual hosts. Upstream `proxy_ssl_*` directives apply to `https://` upstreams and are unnecessary for this `http://` destination.
 
-The runtime rejects remote admin routes, including encoded paths, independently of the proxy's deny rule. Forwarded client IPs do not change that decision. Nginx forwards cookies, recording uploads, and HTTP range requests through the same location.
+Public admin routes require the token; an explicitly approved WireGuard source may bypass it. Nginx must overwrite `X-Real-IP`, never trust a client-supplied header. Nginx forwards cookies, recording uploads, and HTTP range requests through the same location.
 
 A verified HTTPS upstream remains an alternative: configure the runtime's `TLS_CERT` and `TLS_KEY`, proxy to `https://10.77.0.3:7373`, preserve Host, and verify its certificate against a trusted CA and matching certificate name. That transport requires no `TRUSTED_PROXY`. Keep upstream certificate verification enabled.
 

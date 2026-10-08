@@ -10,14 +10,14 @@
   <header>
     <div class="topbar">
       <div class="brand">Open Dub <small>Host studio</small></div>
-      <span id="connection" class="connection" role="status">Local admin access</span>
+      <span id="connection" class="connection" role="status">Host studio</span>
     </div>
   </header>
   <main>
     <div id="error" class="error" role="alert" hidden></div>
     <section id="login-panel" class="panel narrow">
       <h1>Open host studio</h1>
-      <p class="muted">Use the admin token printed when this runtime started. Admin access is local to this computer.</p>
+      <p class="muted">Enter the token from <code>opendub-auth</code> on the server. Approved WireGuard clients enter automatically without a token.</p>
       <form id="login-form">
         <div class="field"><label for="admin-token">Admin token</label><input id="admin-token" type="password" autocomplete="off" required></div>
         <button id="login-button">Open studio</button>
@@ -48,6 +48,12 @@
       <section id="screen-packs" class="panel admin-screen">
         <div id="party-create" class="section-heading"><div><h2>Create a party</h2><p class="muted">Start a lasting party, then share its invitation before choosing a pack.</p></div><button id="create-party" type="button">Create party</button></div>
         <div id="pack-heading" class="section-heading" hidden><div><h2>Choose a pack</h2><p class="muted">Pick the next story for this party.</p></div><button id="refresh-packs" class="secondary" type="button">Refresh packs</button></div>
+        <form id="workshop-form" class="panel" hidden>
+          <h3>Download from Steam Workshop</h3>
+          <p class="muted">Enter a Dub Together Workshop URL or numeric item ID. Downloads require SteamCMD; some items may require Steam login on the server.</p>
+          <div class="copy-field"><input id="workshop-item" aria-label="Steam Workshop item URL or ID" type="text" placeholder="Workshop URL or item ID" maxlength="300" required><button id="workshop-download" type="submit">Download pack</button></div>
+          <p id="workshop-status" class="help" role="status" aria-live="polite"></p>
+        </form>
         <div id="pack-errors" class="notice" hidden></div>
         <div class="pack-list-actions"><button id="back-to-setup" class="secondary" hidden>Back to setup</button></div>
         <div id="pack-filter-controls" class="pack-filter-controls" hidden>

@@ -63,11 +63,46 @@ $('login-form').addEventListener('submit', async event => {
   try {
     await publicLinkReady;
     await client.request('/api/admin/login', { token: $('admin-token').value });
-    $('admin-token').value = ''; await client.start(); await refreshPacks();
+    $('admin-token').value = ''; await client.start(); await refreshPacks(); startWorkshopPolling();
   } catch (problem) { error(problem); }
   finally { setBusy($('login-button'), false, 'Open studio'); }
 });
 $('refresh-packs').addEventListener('click', () => refreshPacks().catch(error));
+let workshopPolling = null;
+async function refreshWorkshopStatus() {
+  const result = await client.request('/api/admin/workshop/status');
+  $('workshop-form').hidden = !result.enabled;
+  if (!result.enabled) { clearInterval(workshopPolling); workshopPolling = null; return; }
+  const job = result.job;
+  $('workshop-download').disabled = job?.status === 'running';
+  $('workshop-status').textContent = job ?
+    (job.status === 'running' ? `Downloading Workshop ${job.id}…` :
+      job.status === 'done' ? `Workshop ${job.id} installed. The pack list is updated.` :
+      `Workshop ${job.id} failed: ${job.error}`) : '';
+  if (job && job.status !== 'running') {
+    clearInterval(workshopPolling); workshopPolling = null;
+    if (job.status === 'done' && job.finishedAt !== lastWorkshopDone) {
+      lastWorkshopDone = job.finishedAt; await refreshPacks();
+    }
+  }
+}
+let lastWorkshopDone = null;
+$('workshop-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = $('workshop-download'); button.disabled = true;
+  try {
+    await client.request('/api/admin/workshop/download', { item: $('workshop-item').value.trim() });
+    await refreshWorkshopStatus();
+    clearInterval(workshopPolling);
+    workshopPolling = setInterval(() => refreshWorkshopStatus().catch(error), 2000);
+  } catch (problem) { error(problem); button.disabled = false; }
+});
+function startWorkshopPolling() {
+  refreshWorkshopStatus().then(() => {
+    if (!workshopPolling && $('workshop-status').textContent.startsWith('Downloading'))
+      workshopPolling = setInterval(() => refreshWorkshopStatus().catch(error), 2000);
+  }).catch(error);
+}
 $('create-party').addEventListener('click', () => action('create-party', {}, $('create-party')).then(() => {
   viewedStage = 1;
   if (client.state) render(client.state);
@@ -522,4 +557,4 @@ function renderTakes(session) {
   }
 }
 
-client.start().then(refreshPacks).catch(() => { /* Local login required for a fresh browser. */ });
+client.start().then(async () => { await refreshPacks(); startWorkshopPolling(); }).catch(() => { /* Login required outside approved WireGuard networks. */ });

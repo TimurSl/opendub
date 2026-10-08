@@ -44,9 +44,9 @@ npm install
 WORKSHOP_DIR="/path/to/steamapps/workshop/content/GAME_ID" npm start
 ```
 
-Point `WORKSHOP_DIR` at the directory containing your installed pack directories, or at a single pack directory. Obtain Workshop content through your own authorized installation; this runtime does not download or publish packs.
+Point `WORKSHOP_DIR` at the directory containing your installed pack directories, or at a single pack directory. Workshop downloading is optional and requires SteamCMD; you can also supply packs through an existing authorized Steam installation. This runtime does not publish packs.
 
-Startup prints a local admin address and a separate admin token. Open `http://localhost:7373/admin`, enter that token, create a party, and share its invitation. Players can join before you choose a pack. Keep the admin token private. Packs and recordings stay on the host computer.
+Startup prints a local admin address; it never logs the token. Run `node bin/opendub-auth --data-dir "${DATA_DIR:-./data}"`, then open `http://localhost:7373/admin`, enter that token, create a party, and share its invitation. Players can join before you choose a pack. Keep the admin token private. Packs and recordings stay on the host computer.
 
 Typical host workflow:
 
@@ -87,7 +87,7 @@ npm start
 
 The certificate must cover the hostname or IP address in the join URL. A locally issued certificate requires trusting its certificate authority on each client; clicking through a certificate warning may not grant microphone access. Tools such as `mkcert` can issue local certificates, but clients still need to trust the issuer. Use `https://localhost:7373/admin` on the host and share `https://HOST_LAN_IP:7373` links with players. The player interface explains secure-context and permission failures.
 
-Keep admin access local: log in through localhost. Player credentials do not authorize admin requests. The runtime checks browser origins against its connection scheme and Host header. An HTTPS proxy can forward over HTTP through WireGuard when `TRUSTED_PROXY` contains the VPS's WireGuard source IP and the proxy preserves Host and sets `X-Forwarded-Proto: https`. A verified HTTPS upstream also works. Follow [Desktop + VPS as Proxy](docs/DESKTOP_VPS_PROXY.md) for Nginx/NixOS configuration, scoped firewall rules, and invitation URLs. There is no relay service in this MVP.
+Keep admin tokens private: public admin APIs require the token (or a configured WireGuard IP bypass). Player credentials do not authorize admin requests. The runtime checks browser origins against its connection scheme and Host header. An HTTPS proxy can forward over HTTP through WireGuard when `TRUSTED_PROXY` contains the VPS's WireGuard source IP and the proxy preserves Host and sets `X-Forwarded-Proto: https`. A verified HTTPS upstream also works. Follow [Desktop + VPS as Proxy](docs/DESKTOP_VPS_PROXY.md) for Nginx/NixOS configuration, scoped firewall rules, and invitation URLs. There is no relay service in this MVP.
 
 ## Pack compatibility
 
@@ -117,7 +117,7 @@ Alternatively pass `npm start -- --transcode-video`. The runtime creates and ser
 
 ## Configuration
 
-The runtime accepts environment variables; see startup output for the effective bind address. `WORKSHOP_DIR` selects the pack root. `DATA_DIR` selects runtime file storage for recordings and the optional video cache (default `./data`). Room state stays in memory and recordings are cleared when the server restarts. `HOST` and `PORT` control the listener (defaults `0.0.0.0` and `7373`). `PUBLIC_LINK` optionally sets the public HTTP(S) origin used in copied player join links, for example `https://dub.example.com`; a trailing slash is ignored. When unset, join links use the address opened in the host studio. `PUBLIC_LINK` does not grant proxy trust. `TRUSTED_PROXY` is an optional comma-separated list of exact proxy source IP addresses, for example `10.77.0.1`; it permits those peers to supply a single `http` or `https` value in `X-Forwarded-Proto` for origin checks and Secure cookies. Other peers' forwarded headers are ignored. Do not put the desktop's address or a subnet here. The actual socket address still determines admin access. `ADMIN_TOKEN` optionally supplies a stable admin secret instead of generating one. Store secrets outside version control.
+The runtime accepts environment variables; see startup output for the effective bind address. `WORKSHOP_DIR` selects the pack root. `DATA_DIR` selects runtime file storage for recordings and the optional video cache (default `./data`). Room state stays in memory and recordings are cleared when the server restarts. `HOST` and `PORT` control the listener (defaults `0.0.0.0` and `7373`). `PUBLIC_LINK` optionally sets the public HTTP(S) origin used in copied player join links, for example `https://dub.example.com`; a trailing slash is ignored. When unset, join links use the address opened in the host studio. `PUBLIC_LINK` does not grant proxy trust. `TRUSTED_PROXY` is an optional comma-separated list of exact proxy source IP addresses, for example `10.77.0.1`; it permits those peers to supply a single `http` or `https` value in `X-Forwarded-Proto` for origin checks and Secure cookies. Other peers' forwarded headers are ignored. Do not put the desktop's address or a subnet here. A trusted proxy may also send an overwritten `X-Real-IP`; only addresses explicitly listed in `WG_ADMIN_CIDRS` are granted no-token admin access. `ADMIN_TOKEN` remains a compatibility override, but normal deployments use the persistent randomly generated `DATA_DIR/admin-token` managed with `opendub-auth`. Never put the admin token in the Nix store.
 
 `PREVIEW_BEFORE` and `PREVIEW_AFTER` set preview padding in seconds; defaults are 1.5 and 0.5. Padding affects preview only: microphone takes start at the line timestamp so padding cannot shift the final mix. `MAX_UPLOAD_MB` sets the per-take size limit (default 25 MiB). `TLS_CERT` and `TLS_KEY` must be provided together. `TRANSCODE_VIDEO=1` enables whole-video MP4 caching; `FFMPEG_PATH` selects the executable.
 
@@ -131,7 +131,7 @@ npm test
 
 Tests create synthetic packs and cover party and match lifecycle, both assignment modes, shuffled equal line deals, per-line authorization, reassignment and progress, stale uploads, replacement-retake identity, cancellation and completion waits, chromatic pitch analysis, pack counts and filters, role conflicts and limits, microphone gain routing, both recording waits, waveform overlays, pending button states, export outcomes, playback timing, and server security. They do not redistribute or require third-party Workshop media. See [docs/DESIGN.md](docs/DESIGN.md) for models, HTTP/WebSocket messages, state transitions, and timing decisions; see [docs/VALIDATION.md](docs/VALIDATION.md) for coverage and browser-test limits.
 
-Public relay, ffmpeg export, Workshop publishing, accounts, and cloud storage are outside this MVP.
+Workshop publishing, external accounts and cloud storage are outside this runtime; FFmpeg export is implemented.
 
 ## License
 
@@ -148,3 +148,9 @@ recommended to prevent feedback). The measured lead-in and allowed tail are stor
 with the take (legacy takes use zero padding) and used for host/player playback
 and exported MP4 audio. Custom FFmpeg remains post-processing, so its live cyan
 trace shows the incoming recording rather than the resulting FFmpeg effect.
+
+## Standalone NixOS / VPS hosting (2026)
+
+The runtime can now be deployed directly on a VPS: no desktop relay required. It ships a Nix flake, `services.opendub` NixOS module, HTTPS Nginx integration, Workshop download API/UI (SteamCMD), and the persistent `opendub-auth` admin token utility. The public admin page requires a token; a specifically allowed WireGuard network can bypass it. Read [docs/NIXOS_STANDALONE.md](docs/NIXOS_STANDALONE.md) for a full example on NixOS host `pussy`, including the [Patchouli Deployment](https://zenisoft.net.ua/projects/patchouli-deployment/) webhook/flake input workflow.
+
+To run standalone outside NixOS, set `DATA_DIR` to a persistent writable directory, `WORKSHOP_DIR` to a writable packs directory, `PUBLIC_LINK` to the public HTTPS origin, `HOST=127.0.0.1`, and `TRUSTED_PROXY` to the exact Nginx source IP (usually `127.0.0.1`). Set `STEAMCMD_PATH` (and optionally `STEAMCMD_DIR`, `STEAMCMD_USERNAME`) to enable Workshop downloading. The default Steam App ID is `5020310`. Set `WG_ADMIN_CIDRS=10.77.0.0/24` only when you intend a WireGuard no-token admin bypass and ensure your proxy **overwrites** `X-Real-IP`. The server generates a persistent admin token in `DATA_DIR/admin-token`; run `node bin/opendub-auth --data-dir "$DATA_DIR"` to display it and `--rotate` to immediately revoke it. Never publish that token in environment files, URLs, build logs or CI.
