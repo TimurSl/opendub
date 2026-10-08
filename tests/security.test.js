@@ -105,7 +105,8 @@ test('nickname, assignment, and upload metadata are validated on the server', as
   assert.ok([400, 404].includes((await host.upload(host.player, 'unknown-line')).status));
   const missingField = new FormData();
   missingField.append('unexpected', new Blob([webmBytes], { type: 'audio/webm' }), 'unexpected.webm');
-  assert.ok([400, 413].includes((await host.request('/api/takes/01_alice', { method: 'POST', token: host.player.token, body: missingField })).status));
+  const matchId = (await host.admin('/api/state')).data.session.matchId;
+  assert.ok([400, 413].includes((await host.request('/api/takes/01_alice', { method: 'POST', token: host.player.token, headers: { 'X-Match-ID': matchId }, body: missingField })).status));
 });
 
 test('uploads enforce size, supported MIME, and container signatures without changing progress', async (t) => {
@@ -272,7 +273,7 @@ test('trusted HTTPS proxy supports joining, cookies, player actions, media, and 
   const cookie = cookieHeader.split(';')[0];
   const headers = { Cookie: cookie };
   assert.equal((await proxyRequest(host, '/api/state?viewer=player', { headers })).status, 200);
-  assert.equal((await proxyRequest(host, '/api/player/claim', { headers, body: { character: 'Alice' } })).status, 200);
+  assert.equal((await proxyRequest(host, '/api/player/claim', { headers, body: { character: 'Alice', matchId: joined.data.session.matchId } })).status, 200);
   const media = await proxyRequest(host, joined.data.session.pack.videoUrl, { headers: { ...headers, Range: 'bytes=0-3' } });
   assert.equal(media.status, 206);
   assert.equal(media.data, 'OggS');

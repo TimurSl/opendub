@@ -2,7 +2,7 @@
 
 A small self-hosted browser runtime for locally installed Dub Together Workshop packs. This is an independent open-source application: it does not contain or copy Dub Together code, interface, or bundled media.
 
-Players record their own assigned lines **independently and in parallel**. There is no global recording turn or current line. One player can retake a line while everybody else continues. Characters can outnumber players, and each player can own several characters. There is no hardcoded eight-player limit.
+Players record their own assigned lines **independently and in parallel**. There is no global recording turn or current line. Hosts choose Character mode, which assigns all lines for a character to one player, or Line mode, which gives each recording task its own owner and can give one character several voices. An unfinished line can be revisited, and an accepted take can be replaced with a player retake while other players continue. Characters can outnumber players, and there is no hardcoded eight-player limit.
 
 ## Run locally
 
@@ -15,24 +15,27 @@ WORKSHOP_DIR="/path/to/steamapps/workshop/content/GAME_ID" npm start
 
 Point `WORKSHOP_DIR` at the directory containing your installed pack directories, or at a single pack directory. Obtain Workshop content through your own authorized installation; this runtime does not download or publish packs.
 
-Startup prints a local admin address and a separate admin token. Open `http://localhost:7373/admin`, enter that token, and select a pack. Share the join link from the host interface with players. Keep the admin token private. Packs and recordings stay on the host computer.
+Startup prints a local admin address and a separate admin token. Open `http://localhost:7373/admin`, enter that token, create a party, and share its invitation. Players can join before you choose a pack. Keep the admin token private. Packs and recordings stay on the host computer.
 
 Typical host workflow:
 
-1. Select a discovered pack and check its metadata and characters.
-2. Let players join with their nicknames.
-3. Assign characters manually or distribute them automatically.
-4. Start recording. Every player works through their own chronological queue.
-5. Check each player's progress and listen to uploaded takes. Request retakes or reassign characters as needed.
+1. Create a party and share its invitation. Players may join while the host chooses a pack.
+2. Filter discovered packs by title and character count, then choose a pack for the next match.
+3. Choose the game mode during setup. In Character mode, assign characters manually or distribute them automatically. In Line mode, use **Deal lines** to shuffle every task across the players connected at that moment; you can also assign or move individual lines. Counts differ by at most one after a deal, and every player's queue stays chronological.
+4. Start recording after every line has an owner. In Line mode, players with no assigned lines wait without microphone setup or READY.
+5. Check each player's progress and listen to uploaded takes. Request host retakes or move characters or lines as needed. Moving an accepted line keeps the accepted take and its original recorder attribution; an unfinished candidate is cleared.
 6. Start final playback when every required line has an accepted take. Starting with missing lines requires an explicit host choice.
+7. Choose **Next match** from review or final playback to return the same players to the party waiting screen. Choose the same or another pack to start a fresh match.
 
-Accepted recordings survive disconnection and character reassignment while the server is running. Unfinished lines stay pending. Restarting the server creates a new empty room and deletes the previous room's recordings.
+The party invitation, player credentials, nicknames, connections, and host settings, including the selected game mode, last across matches. Each match gets a new match ID; its assignments, readiness, queues, takes, and playback are cleared. Assignment locks the mode for that match. Change it from setup for the next match. **Replace party** invalidates the old invitation and player credentials. Restarting the server clears the party and recordings.
 
 ## Player workflow
 
-Open the host's invitation and enter your nickname. Once your characters appear, press **READY** and allow microphone access. Your browser shows one assigned line at a time while everyone else follows their own queue.
+Open the host's invitation and enter your nickname. Hosts who participate open the same public invitation and use the same Player UI as everyone else. In Character mode, you can choose or release characters during role selection; each character shows its task count and owner. In Line mode, the host assigns individual lines and your screen shows your line count and character summary. You need at least one assigned line to set up the microphone and press **READY**. Players with no lines wait without microphone setup.
 
-Use **ORIGINAL** to watch the scene with its reference audio, **RECORD** to record or retake it, and **MY TAKE** to watch your version. Recording shows a countdown and microphone waveform; the recording button becomes **STOP** while capturing. Takes save in the background. Press **NEXT** to accept your take and advance your queue. A failed save can retry without losing the local take.
+During recording and on **DONE**, the native **Go to your line** picker lists your assigned lines in chronological order, with line number, character, shortened caption, and completion status. Selecting a line opens its scene and reference audio. Browsing accepted lines does not change completion. **RECORD** records an unfinished line; on an accepted line it starts a replacement retake. **MY TAKE** plays the replacement when one is saved, otherwise the accepted take. Press **NEXT** to accept a successfully saved take. For a replacement, NEXT atomically replaces the accepted take; until then the accepted version stays in use. Use **Cancel retake** to keep the accepted version. Leaving with an unaccepted take asks before discarding it; line switching is disabled during capture and acceptance.
+
+The effect selector includes **AUTO-TUNE**, a strong chromatic correction to the nearest equal-tempered note using A4 = 440 Hz. It corrects voiced pitch and lets silence and unvoiced sounds pass through. The effect is baked into the saved audio. If the browser cannot run the audio worklet needed for tuning, AUTO-TUNE is disabled with an explanation. The comparison shows the original in purple and your full take in cyan; the live microphone meter remains separate. The **Amplify microphone** slider ranges from 0% to 300% and remembers your setting in this browser. After the optional countdown, the scene waits 0.2 seconds before recording starts. Capture stops at the line end after any voice-effect tail; the take review appears 0.2 seconds later while saving can continue in the background. A failed save can retry without losing the local take.
 
 After your last line, **DONE** appears while the remaining players finish. Final playback loads quietly and starts when the host starts the dub. Its only control is **PLAY / PAUSE**. Press PLAY if your browser needs another gesture to enable sound; resuming catches up to the shared movie timeline.
 
@@ -93,7 +96,7 @@ Uploaded recordings have a size limit and their media type is validated. The ser
 npm test
 ```
 
-Tests create synthetic packs and exercise parsing, three-player parallel uploads, ownership, independent progress, retakes, reassignment, room security, upload validation, clean restart behavior, and playback windows. They do not redistribute or require third-party Workshop media. See [docs/DESIGN.md](docs/DESIGN.md) for models, HTTP/WebSocket messages, state transitions, and timing decisions.
+Tests create synthetic packs and cover party and match lifecycle, both assignment modes, shuffled equal line deals, per-line authorization, reassignment and progress, stale uploads, replacement-retake identity, cancellation and completion waits, chromatic pitch analysis, pack counts and filters, role conflicts and limits, microphone gain routing, both recording waits, waveform overlays, pending button states, export outcomes, playback timing, and server security. They do not redistribute or require third-party Workshop media. See [docs/DESIGN.md](docs/DESIGN.md) for models, HTTP/WebSocket messages, state transitions, and timing decisions; see [docs/VALIDATION.md](docs/VALIDATION.md) for coverage and browser-test limits.
 
 Public relay, ffmpeg export, Workshop publishing, accounts, and cloud storage are outside this MVP.
 

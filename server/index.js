@@ -74,7 +74,10 @@ function validateBody(req, shape = {}) {
   if (!body || typeof body !== "object" || Array.isArray(body)) fail("Expected a JSON object");
   if (Object.keys(body).some(key => !Object.hasOwn(shape, key))) fail("Unknown request field");
   for (const [key, type] of Object.entries(shape)) {
-    if (typeof body[key] !== type) fail("Invalid " + key);
+    const optional = type.endsWith("?");
+    const expected = optional ? type.slice(0, -1) : type;
+    if (optional && body[key] === undefined) continue;
+    if (typeof body[key] !== expected) fail("Invalid " + key);
     if (type === "string" && body[key].length > 2048) fail("Invalid " + key);
   }
   return body;
@@ -238,7 +241,7 @@ export async function createRuntime(options = {}) {
     discovered.packs = refreshed.packs;
     discovered.errors = refreshed.errors;
     store.packs = new Map(refreshed.packs.map(pack => [pack.id, pack]));
-    res.json({ packs: discovered.packs.map(pack => ({ id: pack.id, metadata: pack.metadata, characters: pack.characters, lineCount: pack.lines.length, characterCount: pack.characters.length, iconUrl: pack.icon ? `/api/admin/packs/${encodeURIComponent(pack.id)}/icon` : null })), errors: discovered.errors });
+    res.json({ packs: discovered.packs.map(pack => ({ id: pack.id, metadata: pack.metadata, characters: pack.characters, characterLineCounts: pack.characterLineCounts, lineCount: pack.lines.length, characterCount: pack.characters.length, iconUrl: pack.icon ? `/api/admin/packs/${encodeURIComponent(pack.id)}/icon` : null })), errors: discovered.errors });
   });
   app.get("/api/admin/packs/:packId/icon", authenticated("admin"), async (req, res) => {
     const pack = store.packs.get(req.params.packId);
@@ -248,29 +251,39 @@ export async function createRuntime(options = {}) {
     const real = await fs.realpath(asset.path);
     const relative = path.relative(pack.directory, real);
     if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) fail("Pack icon is outside its directory", 403);
-    res.type(asset.type); res.sendFile(real);
+    res.type(asset.type); res.sendFile(real, { dotfiles: "allow" });
   });
-  const adminAction = (route, shape, operation) => app.post("/api/admin/" + route, authenticated("admin"), async (req, res) => {
-    const body = validateBody(req, shape);
-    await store.mutate(() => operation(body));
+  const adminAction = (route, shape, operation, { matchScoped = true } = {}) => app.post("/api/admin/" + route, authenticated("admin"), async (req, res) => {
+    const body = validateBody(req, matchScoped ? { ...shape, matchId: "string" } : shape);
+    await store.mutate(() => {
+      if (matchScoped) store.requireMatch(body.matchId);
+      return operation(body);
+    });
     snapshot(req, res);
   });
-  adminAction("select", { packId: "string" }, async ({ packId }) => {
+  adminAction("create-party", {}, () => store.createParty(), { matchScoped: false });
+  app.post("/api/admin/select", authenticated("admin"), async (req, res) => {
+    const { packId, partyId } = validateBody(req, { packId: "string", partyId: "string" });
     const pack = store.packs.get(packId);
     if (!pack) fail("Unknown pack", 404);
     if (transcodeVideo) await transcode(pack, dataDir, ffmpegPath);
-    store.select(packId);
+    await store.mutate(() => store.select(packId, partyId));
+    snapshot(req, res);
   });
   adminAction("settings", {
+    gameMode: "string",
     freeRolePicking: "boolean", allowMultipleRoles: "boolean", maxRolesPerPlayer: "number",
     autoBalanceSuggestions: "boolean", lockRolesWhenReady: "boolean",
     referencePlaybackEnabled: "boolean", voiceEffectsEnabled: "boolean", compactMobilePreferred: "boolean",
-  }, options => store.configure(options));
+  }, options => store.configure(options), { matchScoped: false });
+  adminAction("next-match", {}, () => store.nextMatch(), { matchScoped: false });
   adminAction("open-lobby", {}, () => store.openLobby());
   adminAction("lock-roles", {}, () => store.lockRoles());
   adminAction("reopen-roles", {}, () => store.reopenRoles());
   adminAction("assign", { character: "string", playerId: "string" }, ({ character, playerId }) => store.assign(character, playerId));
   adminAction("unassign", { character: "string" }, ({ character }) => store.unassignRole(character));
+  adminAction("deal-lines", {}, () => store.dealLines());
+  adminAction("assign-line", { lineId: "string", playerId: "string" }, ({ lineId, playerId }) => store.assignLine(lineId, playerId));
   adminAction("distribute", {}, () => store.distribute());
   adminAction("fill-unassigned", {}, () => store.fillUnassigned());
   adminAction("start", {}, () => store.startRecording());
@@ -283,13 +296,19 @@ export async function createRuntime(options = {}) {
     store.data.playback = { id: randomId(), startsAt: Date.now() + 5000 };
   });
   app.post("/api/admin/export", authenticated("admin"), async (req, res) => {
-    validateBody(req, {});
+    const { matchId } = validateBody(req, { matchId: "string" });
+    store.requireMatch(matchId);
     if (!store.pack || !["review", "playback"].includes(store.data.state)) fail("Finish review before exporting the video", 409);
+    const exportingMatchId = matchId;
     const acceptedTakes = store.pack.lines.flatMap(line => {
       const take = store.data.lineTakes[line.id];
       return take?.status === "accepted" ? [{ take: { ...take, path: store.takePath(take) }, line }] : [];
     });
     const result = await exportDub(store.pack, dataDir, ffmpegPath, acceptedTakes);
+    if (store.data.matchId !== exportingMatchId) {
+      await fs.rm(result.output, { force: true });
+      fail("Match changed while the video was exporting", 409);
+    }
     exports.set(result.id, result.output);
     while (exports.size > 5) {
       const oldest = exports.keys().next().value;
@@ -306,8 +325,11 @@ export async function createRuntime(options = {}) {
     res.sendFile(filename);
   });
   app.post("/api/admin/retake", authenticated("admin"), async (req, res) => {
-    const { lineId } = validateBody(req, { lineId: "string" });
-    const previous = await store.mutate(() => store.retake(lineId));
+    const { lineId, matchId } = validateBody(req, { lineId: "string", matchId: "string" });
+    const previous = await store.mutate(() => {
+      store.requireMatch(matchId);
+      return store.retake(lineId);
+    });
     if (previous) await fs.rm(store.takePath(previous), { force: true });
     snapshot(req, res);
   });
@@ -321,13 +343,40 @@ export async function createRuntime(options = {}) {
     res.json({ ...store.snapshot({ kind: "player", playerId: player.id }), token: player.token });
   });
   const playerAction = (route, shape, operation) => app.post("/api/player/" + route, authenticated("player"), async (req, res) => {
-    const body = validateBody(req, shape);
-    await store.mutate(() => operation(body, req.viewer.playerId));
+    const body = validateBody(req, { ...shape, matchId: "string" });
+    await store.mutate(() => {
+      store.requireMatch(body.matchId);
+      return operation(body, req.viewer.playerId);
+    });
     snapshot(req, res);
   });
   playerAction("claim", { character: "string" }, ({ character }, playerId) => store.claimRole(character, playerId));
   playerAction("release", { character: "string" }, ({ character }, playerId) => store.releaseRole(character, playerId));
   playerAction("ready", { ready: "boolean" }, ({ ready }, playerId) => store.setPlayerReady(playerId, ready));
+  app.post("/api/takes/:lineId/retake", authenticated("player"), async (req, res) => {
+    const { matchId, attemptId } = validateBody(req, { matchId: "string", attemptId: "string?" });
+    const retakeId = await store.mutate(() => {
+      store.requireMatch(matchId);
+      return store.beginRetake(req.params.lineId, req.viewer.playerId, attemptId);
+    });
+    res.json({ ...store.snapshot(req.viewer), retakeId });
+  });
+  app.post("/api/takes/:lineId/retake/cancel", authenticated("player"), async (req, res) => {
+    const { matchId, retakeId } = validateBody(req, { matchId: "string", retakeId: "string" });
+    await store.mutate(() => {
+      store.requireMatch(matchId);
+      return store.cancelPlayerRetake(req.params.lineId, { playerId: req.viewer.playerId, retakeId });
+    });
+    snapshot(req, res);
+  });
+  app.post("/api/takes/:lineId/discard", authenticated("player"), async (req, res) => {
+    const { matchId, takeId } = validateBody(req, { matchId: "string", takeId: "string" });
+    await store.mutate(() => {
+      store.requireMatch(matchId);
+      return store.discardCandidate(req.params.lineId, { playerId: req.viewer.playerId, takeId });
+    });
+    snapshot(req, res);
+  });
   app.get("/api/state", authenticated(), snapshot);
   const upload = multer({
     dest: path.join(dataDir, "tmp"),
@@ -340,12 +389,21 @@ export async function createRuntime(options = {}) {
   }).single("take");
   app.post("/api/takes/:lineId", authenticated("player"), (req, res, next) => {
     try {
+      req.uploadMatchId = req.get("x-match-id");
+      req.uploadRetakeId = req.get("x-retake-id") || "";
+      store.requireMatch(req.uploadMatchId);
       store.requireOwner(req.viewer.playerId, req.params.lineId);
       const existing = store.data.lineTakes[req.params.lineId];
-      if (existing?.status === "accepted") fail("Accepted take requires a host retake request", 409);
-      req.uploadSessionId = store.data.id;
-      req.previousTakeId = existing?.id ?? null;
       req.uploadLineVersion = store.data.lineVersions[req.params.lineId] ?? 0;
+      const active = req.uploadRetakeId ? store.data.activeRetakes[req.params.lineId] : null;
+      if (req.uploadRetakeId) {
+        if (!active || active.id !== req.uploadRetakeId || active.playerId !== req.viewer.playerId || active.matchId !== req.uploadMatchId || active.lineVersion !== req.uploadLineVersion) fail("Retake changed before upload", 409);
+        if (existing?.status !== "accepted" || existing.id !== active.acceptedTakeId) fail("Accepted take changed before upload", 409);
+        req.previousTakeId = store.data.replacementTakes[req.params.lineId]?.id ?? null;
+      } else {
+        if (existing?.status === "accepted") fail("Start a replacement retake before recording this accepted line", 409);
+        req.previousTakeId = existing?.id ?? null;
+      }
       upload(req, res, next);
     } catch (error) { next(error); }
   }, async (req, res) => {
@@ -359,7 +417,7 @@ export async function createRuntime(options = {}) {
       destination = store.takePath({ id });
       await store.mutate(async () => {
         // Ownership/lifecycle checks happen after the whole upload, too.
-        store.storeTake({ playerId: req.viewer.playerId, lineId: req.params.lineId, id, mime, size: req.file.size, sessionId: req.uploadSessionId, previousTakeId: req.previousTakeId, lineVersion: req.uploadLineVersion });
+        store.storeTake({ playerId: req.viewer.playerId, lineId: req.params.lineId, id, mime, size: req.file.size, matchId: req.uploadMatchId, previousTakeId: req.previousTakeId, lineVersion: req.uploadLineVersion, retakeId: req.uploadRetakeId });
         await fs.rename(req.file.path, destination);
         await fs.chmod(destination, 0o600);
       });
@@ -371,8 +429,11 @@ export async function createRuntime(options = {}) {
     }
   });
   app.post("/api/takes/:lineId/accept", authenticated("player"), async (req, res) => {
-    const { takeId } = validateBody(req, { takeId: "string" });
-    await store.mutate(() => store.accept(req.params.lineId, { playerId: req.viewer.playerId, takeId }));
+    const { takeId, matchId, retakeId = "" } = validateBody(req, { takeId: "string", matchId: "string", retakeId: "string?" });
+    await store.mutate(() => {
+      store.requireMatch(matchId);
+      return store.accept(req.params.lineId, { playerId: req.viewer.playerId, takeId, retakeId });
+    });
     snapshot(req, res);
   });
   app.get("/media/:packId/:assetId", authenticated(), async (req, res) => {
@@ -384,11 +445,14 @@ export async function createRuntime(options = {}) {
     const relative = path.relative(permittedRoot, real);
     if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) fail("Asset is outside selected pack", 403);
     res.type(asset.type);
-    res.sendFile(real);
+    res.sendFile(real, { dotfiles: "allow" });
   });
   app.get("/takes/:takeId", authenticated(), (req, res) => {
-    const take = Object.values(store.data.lineTakes).find(take => take.id === req.params.takeId);
+    const acceptedTake = Object.values(store.data.lineTakes).find(take => take.id === req.params.takeId);
+    const replacementTake = Object.values(store.data.replacementTakes).find(take => take.id === req.params.takeId);
+    const take = acceptedTake || replacementTake;
     if (!take) fail("Unknown take", 404);
+    if (replacementTake && (req.viewer.kind !== "player" || replacementTake.playerId !== req.viewer.playerId)) fail("Replacement take belongs to another player", 403);
     res.type(take.mime);
     res.sendFile(store.takePath(take));
   });
@@ -438,7 +502,7 @@ export async function createRuntime(options = {}) {
       ws.send(JSON.stringify({ type: "pong", serverTime: Date.now() }));
     });
     ws.on("error", () => {});
-    ws.on("close", () => { if (viewer.kind === "player" && ws.roomId === store.data.id) store.presence(viewer.playerId, -1); });
+    ws.on("close", () => { if (viewer.kind === "player" && ws.roomId === store.data.id) store.presence(viewer.playerId, -1).catch(() => {}); });
   });
   const broadcast = () => {
     for (const ws of websocket.clients) {

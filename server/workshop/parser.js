@@ -99,7 +99,9 @@ export async function parseWorkshopPack(directory, { id } = {}) {
   }
   if (!lines.length) throw new Error("Pack contains no recording lines");
   lines.sort((a, b) => a.startTime - b.startTime || a.id.localeCompare(b.id));
-  return { id: packId, directory: root, metadata, video, backingTrack, icon, videoUrl, backingTrackUrl, iconUrl, characters: [...new Set(lines.map(line => line.character))], lines, assets };
+  const characters = [...new Set(lines.map(line => line.character))];
+  const characterLineCounts = characters.map(character => lines.filter(line => line.character === character).length);
+  return { id: packId, directory: root, metadata, video, backingTrack, icon, videoUrl, backingTrackUrl, iconUrl, characters, characterLineCounts, lines, assets };
 }
 
 export async function discoverPacks(workshopDir, { maxDepth = 3 } = {}) {

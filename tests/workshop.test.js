@@ -19,7 +19,8 @@ test('parser discovers metadata, characters, optional reference, and chronologic
   assert.equal(pack.metadata.title, 'Synthetic pack – тест');
   assert.deepEqual(pack.metadata.authors, ['Runtime tests', 'Second author']);
   assert.equal(pack.metadata.language, 'RUS');
-  assert.deepEqual(new Set(pack.characters), new Set(['Alice', 'Bob', 'Cara', 'Narrator']));
+  assert.deepEqual(pack.characters, ['Alice', 'Bob', 'Cara', 'Narrator']);
+  assert.deepEqual(pack.characterLineCounts, [2, 2, 2, 1]);
   assert.deepEqual(pack.lines.map((line) => line.id), fixtureLines.map((line) => line.id));
   assert.equal(pack.lines[0].character, 'Alice');
   assert.ok(Math.abs(pack.lines[0].duration - 0.4) < 1e-9);

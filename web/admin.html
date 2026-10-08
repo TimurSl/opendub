@@ -30,7 +30,7 @@
       </div>
       <nav class="stage-nav" aria-label="Session stages">
         <ol>
-          <li id="stage-indicator-1"><button id="stage-button-1" type="button" aria-label="Step 1: Pack" aria-controls="screen-packs" data-stage="1"><span>1</span><small aria-hidden="true">Pack</small></button></li>
+          <li id="stage-indicator-1"><button id="stage-button-1" type="button" aria-label="Step 1: Party and pack" aria-controls="screen-packs" data-stage="1"><span>1</span><small aria-hidden="true">Party</small></button></li>
           <li id="stage-indicator-2"><button id="stage-button-2" type="button" aria-label="Step 2: Setup" aria-controls="screen-setup" data-stage="2"><span>2</span><small aria-hidden="true">Setup</small></button></li>
           <li id="stage-indicator-3"><button id="stage-button-3" type="button" aria-label="Step 3: Roles" aria-controls="screen-roles" data-stage="3"><span>3</span><small aria-hidden="true">Roles</small></button></li>
           <li id="stage-indicator-4"><button id="stage-button-4" type="button" aria-label="Step 4: Record" aria-controls="screen-recording" data-stage="4"><span>4</span><small aria-hidden="true">Record</small></button></li>
@@ -38,29 +38,39 @@
           <li id="stage-indicator-6"><button id="stage-button-6" type="button" aria-label="Step 6: Playback" aria-controls="screen-playback" data-stage="6"><span>6</span><small aria-hidden="true">Playback</small></button></li>
         </ol>
       </nav>
+      <section id="party-invite" class="panel invite-block" hidden aria-label="Party invitation">
+        <div class="section-heading"><div><h2>Party invitation</h2><p class="muted">Players can join now and stay in this party between matches.</p></div><button id="replace-party" type="button" class="danger">Replace party</button></div>
+        <label for="join-url">Player invitation</label>
+        <div class="copy-field"><input id="join-url" readonly><button id="copy-join" class="secondary" type="button">Copy link</button></div>
+        <div class="room-code"><span>Party code</span><strong id="room-code"></strong></div>
+        <p class="help">Microphone recording requires a secure browser connection.</p>
+      </section>
       <section id="screen-packs" class="panel admin-screen">
-        <div class="section-heading"><div><h2>Choose a pack</h2><p class="muted">Pick the story everyone will dub together.</p></div><button id="refresh-packs" class="secondary">Refresh packs</button></div>
+        <div id="party-create" class="section-heading"><div><h2>Create a party</h2><p class="muted">Start a lasting party, then share its invitation before choosing a pack.</p></div><button id="create-party" type="button">Create party</button></div>
+        <div id="pack-heading" class="section-heading" hidden><div><h2>Choose a pack</h2><p class="muted">Pick the next story for this party.</p></div><button id="refresh-packs" class="secondary" type="button">Refresh packs</button></div>
         <div id="pack-errors" class="notice" hidden></div>
         <div class="pack-list-actions"><button id="back-to-setup" class="secondary" hidden>Back to setup</button></div>
+        <div id="pack-filter-controls" class="pack-filter-controls" hidden>
+          <label for="pack-search">Search titles<input id="pack-search" type="search" autocomplete="off"></label>
+          <label for="pack-min-characters">Minimum characters<input id="pack-min-characters" type="number" min="0" step="1" inputmode="numeric"></label>
+          <label for="pack-max-characters">Maximum characters<input id="pack-max-characters" type="number" min="0" step="1" inputmode="numeric"></label>
+          <button id="clear-pack-filters" class="secondary" type="button">Clear filters</button>
+          <p id="pack-result-count" role="status" aria-live="polite"></p>
+        </div>
         <div id="packs" class="pack-list"></div>
       </section>
 
       <section id="screen-setup" class="panel admin-screen" hidden>
-        <div class="section-heading"><div><p class="eyebrow">SESSION SETUP</p><h2 id="selected-title"></h2><p id="selected-metadata" class="muted"></p></div><button id="change-pack" type="button" class="secondary">Change pack</button></div>
-        <div class="invite-block">
-          <label for="join-url">Player invitation</label>
-          <div class="copy-field"><input id="join-url" readonly><button id="copy-join" class="secondary">Copy link</button></div>
-          <div class="room-code"><span>Room code</span><strong id="room-code"></strong></div>
-          <p class="help">Players can join before you open role selection. Microphone recording requires a secure browser connection.</p>
-        </div>
+        <div class="section-heading"><div><p class="eyebrow">MATCH SETUP</p><h2 id="selected-title"></h2><p id="selected-metadata" class="muted"></p></div><button id="change-pack" type="button" class="secondary">Choose another pack</button></div>
         <form id="settings-form" class="settings-grid">
-          <label class="setting"><input id="free-role-picking" type="checkbox"><span><strong>Players choose their roles</strong><small>Players can claim free characters themselves.</small></span></label>
-          <label class="setting"><input id="multiple-roles" type="checkbox"><span><strong>Allow multiple roles</strong><small>One player may take more than one character.</small></span></label>
-          <label class="setting setting-number"><span><strong>Maximum roles per player</strong><small>Use 0 for no limit.</small></span><input id="max-roles" type="number" min="0" step="1" value="0"></label>
-          <label class="setting"><input id="auto-balance" type="checkbox"><span><strong>Suggest a balance for free roles</strong><small>Offer automatic assignments for characters nobody has claimed.</small></span></label>
-          <label class="setting"><input id="lock-when-ready" type="checkbox"><span><strong>Lock when everyone is ready</strong><small>Role selection locks after every player confirms.</small></span></label>
+          <label class="setting setting-number"><span><strong>Game mode</strong><small>Choose how recording lines are assigned for this match.</small></span><select id="game-mode"><option value="character">Character mode</option><option value="line">Line mode</option></select></label>
+          <label id="setting-free-role-picking" class="setting"><input id="free-role-picking" type="checkbox"><span><strong>Players choose their roles</strong><small>Players can claim free characters themselves.</small></span></label>
+          <label id="setting-multiple-roles" class="setting"><input id="multiple-roles" type="checkbox"><span><strong>Allow multiple roles</strong><small>One player may take more than one character.</small></span></label>
+          <label id="setting-max-roles" class="setting setting-number"><span><strong>Maximum roles per player</strong><small>Use 0 for no limit.</small></span><input id="max-roles" type="number" min="0" step="1" value="0"></label>
+          <label id="setting-auto-balance" class="setting"><input id="auto-balance" type="checkbox"><span><strong>Suggest a balance for free roles</strong><small>Offer automatic assignments for characters nobody has claimed.</small></span></label>
+          <label id="setting-lock-ready" class="setting"><input id="lock-when-ready" type="checkbox"><span><strong>Lock when everyone is ready</strong><small>Role selection locks after every player confirms.</small></span></label>
           <label class="setting"><input id="reference-enabled" type="checkbox"><span><strong>Reference playback</strong><small>Let players hear the original line before recording.</small></span></label>
-          <label class="setting"><input id="effects-enabled" type="checkbox"><span><strong>Voice effects</strong><small>Enable Echo, Phone, and Robot capture effects.</small></span></label>
+          <label class="setting"><input id="effects-enabled" type="checkbox"><span><strong>Voice effects</strong><small>Enable Echo, Phone, Robot, AUTO-TUNE, and other capture effects.</small></span></label>
           <label class="setting"><input id="compact-mobile" type="checkbox"><span><strong>Prefer compact controls on phones</strong><small>Use a tighter recording layout on small screens.</small></span></label>
           <div class="settings-actions"><button id="save-settings" type="submit">Save session settings</button><button id="open-lobby" type="button" class="secondary">Open lobby</button></div>
         </form>
@@ -69,9 +79,16 @@
       <section id="screen-roles" class="admin-screen" hidden>
         <div class="admin-columns">
           <section class="panel">
-            <div class="section-heading"><div><p class="eyebrow">ROLE SELECTION</p><h2>Characters</h2><p id="role-summary" class="muted"></p></div><button id="fill-unassigned" class="secondary">Balance free roles</button></div>
-            <p class="help">Players can claim free characters. Use the menu beside a character to override an assignment.</p>
-            <div id="roles" class="role-list"></div>
+            <div id="character-assignment">
+              <div class="section-heading"><div><p class="eyebrow">ROLE SELECTION</p><h2>Characters</h2><p id="role-summary" class="muted"></p></div><button id="fill-unassigned" class="secondary">Balance free roles</button></div>
+              <p class="help">Assign characters using the menu beside each name, or distribute them automatically.</p>
+              <div id="roles" class="role-list"></div>
+            </div>
+            <div id="line-assignment" hidden>
+              <div class="section-heading"><div><p class="eyebrow">LINE ASSIGNMENT</p><h2>Recording tasks</h2><p id="line-assignment-summary" class="muted"></p></div><button id="deal-lines" type="button">Deal lines</button></div>
+              <p class="help">Deal all lines among players connected now, then adjust individual lines if needed.</p>
+              <div id="line-assignments" class="role-list"></div>
+            </div>
             <div class="actions space-top"><button id="lock-roles">Lock roles</button><button id="unlock-roles" class="secondary" hidden>Reopen role selection</button><button id="start-recording" class="secondary">Start recording</button></div>
           </section>
           <section class="panel">
@@ -86,10 +103,15 @@
           <div class="section-heading"><div><p class="eyebrow">RECORDING PROGRESS</p><h2 id="recording-title">Everyone is recording</h2><p id="completion" class="muted"></p></div><span id="recording-state" class="status-label"></span></div>
           <div id="recording-players" class="progress-list"></div>
           <div class="incomplete-block"><h3>Lines still in progress</h3><ul id="incomplete-lines" class="incomplete-lines"></ul></div>
+          <p id="active-retakes" class="notice" role="status" hidden></p>
         </section>
-        <section class="panel">
+        <section id="character-reassignment" class="panel">
           <div class="section-heading"><div><h2>Reassign characters</h2><p class="muted">Move unfinished lines when someone disconnects.</p></div><button id="recording-balance" class="secondary">Balance free roles</button></div>
           <div id="recording-roles" class="role-list"></div>
+        </section>
+        <section id="line-reassignment" class="panel" hidden>
+          <div class="section-heading"><div><h2>Reassign lines</h2><p class="muted">Move individual lines while preserving accepted takes.</p></div></div>
+          <div id="recording-line-assignments" class="role-list"></div>
         </section>
         <section class="panel actions">
           <button id="pause-session" class="secondary">Pause session</button>
@@ -100,6 +122,10 @@
       </section>
 
       <section id="screen-review" class="admin-screen" hidden>
+        <section id="review-line-reassignment" class="panel" hidden>
+          <div class="section-heading"><div><h2>Reassign lines</h2><p class="muted">Move individual lines while preserving accepted takes.</p></div></div>
+          <div id="review-line-assignments" class="role-list"></div>
+        </section>
         <section class="panel">
           <div class="section-heading"><div><p class="eyebrow">REVIEW</p><h2>Check the takes</h2><p id="review-summary" class="muted"></p></div>
             <label for="line-filter" class="filter-label">Show <select id="line-filter"><option value="all">All lines</option><option value="pending">Missing lines</option><option value="recorded">Needs review</option><option value="accepted">Accepted</option></select></label>
@@ -111,6 +137,7 @@
           <button id="continue-recording" class="secondary">Continue recording</button>
           <button id="review-playback">Start final playback</button>
           <button id="skip-missing" class="danger">Skip missing & play</button>
+          <button id="next-match-review" class="secondary">Next match</button>
         </section>
       </section>
 
@@ -118,10 +145,9 @@
         <section class="panel">
           <div class="section-heading"><div><p class="eyebrow">FINAL PLAYBACK</p><h2>The finished dub</h2><p id="final-summary" class="muted"></p></div></div>
           <div id="playback-root" class="final-playback"></div>
-          <div class="actions final-actions"><button id="restart-playback" class="secondary">Play again for everyone</button><button id="stop-playback" class="secondary">Reopen review</button><button id="export-video">Export video</button></div>
+          <div class="actions final-actions"><button id="restart-playback" class="secondary">Play again for everyone</button><button id="stop-playback" class="secondary">Reopen review</button><button id="export-video">Export video</button><button id="next-match-playback" class="secondary">Next match</button></div>
           <p id="export-status" class="help" role="status" aria-live="polite"></p>
         </section>
-        <section class="panel restart-panel"><div><h2>Start a new session</h2><p class="muted">This clears the current players and takes and creates a new invitation.</p></div><button id="restart-session" class="danger">Restart session</button></section>
       </section>
     </div>
   </main>

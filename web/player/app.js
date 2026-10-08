@@ -1,11 +1,13 @@
 import { RuntimeClient, node } from '../shared/api.js';
 import { LineRecorder } from '../recorder/recorder.js';
 import { DubPlayback } from '../playback/playback.js';
+import { canRecordSelectedLine } from './eligibility.js';
 
 const $ = id => document.getElementById(id);
 const client = new RuntimeClient('player');
 let noticeKind = ''; let rolesFingerprint = null; let readyBusy = false; let visibleMode = null;
-const roleBusy = new Set();
+let preparedRoles = null; let readinessGeneration = 0; let previousPhase = null; let previousServerReady = false; let previousRolesLocked = false;
+let currentMatchId = null; let selectedLineId = null; const rolePending = new Set();
 let connectionTimer;
 
 function friendlyMessage(problem) {
@@ -18,9 +20,10 @@ function friendlyMessage(problem) {
     'This movie could not play. Please try another browser.'
   ]).has(message)) return message;
   if (/origin|cross-site|proxy protocol/i.test(message)) return 'The host needs to check the proxy connection settings before you can join.';
-  if (/already taken/i.test(message)) return 'Someone just picked that character. Choose another one.';
-  if (/role limit/i.test(message)) return 'You have reached the role limit for this game.';
-  if (/locked/i.test(message)) return 'The host locked role selection. Your choices are saved.';
+  if (/already taken/i.test(message)) return 'Someone claimed that character first. Choose another one.';
+  if (/role limit/i.test(message)) return 'You have reached your role limit. Release a character before choosing another.';
+  if (/host is assigning/i.test(message)) return 'The host is choosing roles. Wait for an assignment.';
+  if (/locked/i.test(message)) return 'The host is getting ready to start. Try READY again.';
   if (name === 'NotAllowedError' || /permission|denied/i.test(message)) return 'Allow microphone access, then try READY again.';
   if (name === 'NotFoundError') return 'Connect a microphone, then try READY again.';
   if (name === 'NotReadableError') return 'Close any app using your microphone, then try READY again.';
@@ -40,6 +43,16 @@ function clearNotice(kind) {
 }
 const error = problem => showNotice(friendlyMessage(problem));
 const recorder = new LineRecorder(client, error);
+recorder.onModeChange = mode => {
+  const locked = ['requesting', 'countdown', 'preroll', 'recording', 'settling', 'accepting'].includes(mode);
+  $('line-picker').disabled = locked;
+  $('cancel-retake').hidden = !(recorder.retakeId || recorder.retakeAttemptPending);
+  $('cancel-retake').disabled = locked;
+};
+recorder.onAccepted = () => {
+  selectedLineId = client.state?.queue?.pendingLines?.[0] || null;
+  if (client.state) render(client.state);
+};
 const playback = new DubPlayback($('playback-root'), client, error, { player: true });
 for (const id of ['original', 'record', 'my-take', 'next', 'ready']) $(id).addEventListener('click', () => clearNotice('error'), { capture: true });
 $('playback-root').addEventListener('click', event => { if (event.target.closest('button')) clearNotice('error'); }, { capture: true });
@@ -69,43 +82,35 @@ $('join-form').addEventListener('submit', async event => {
   } catch (problem) { error(problem); }
   finally { $('join-button').disabled = false; }
 });
-$('role-options').addEventListener('click', async event => {
-  const button = event.target.closest('button[data-character]');
-  if (!button || button.disabled) return;
-  const character = button.dataset.character; const action = button.dataset.action; const restoreFocus = document.activeElement === button;
-  roleBusy.add(character); render(client.state); clearNotice();
-  try { await client.request(`/api/player/${action}`, { character }); }
-  catch (problem) { error(problem); }
-  finally {
-    roleBusy.delete(character); if (client.state) render(client.state);
-    if (restoreFocus) requestAnimationFrame(() => $('role-options').querySelector(`button[data-character="${CSS.escape(character)}"]`)?.focus({ preventScroll: true }));
-  }
-});
+function roleKey(snapshot) {
+  return JSON.stringify([snapshot.session.id, snapshot.session.matchId, snapshot.session.pack?.id, snapshot.viewer.playerId, snapshot.session.settings?.gameMode, [...(snapshot.queue?.assignedCharacters || [])].sort(), [...(snapshot.queue?.lines || [])]]);
+}
+function microphoneReady() {
+  return !!recorder.stream?.getAudioTracks().some(track => track.readyState === 'live');
+}
 $('ready').addEventListener('click', async () => {
-  const snapshot = client.state; if (!snapshot || readyBusy) return;
-  const session = snapshot.session; const player = session.players.find(item => item.id === snapshot.viewer.playerId);
-  if (!player || !snapshot.queue?.assignedCharacters.length) return;
+  const snapshot = client.state;
+  if (!snapshot || readyBusy || !(snapshot.session.settings?.gameMode === 'line' ? snapshot.queue?.lines.length : snapshot.queue?.assignedCharacters.length)) return;
+  const key = roleKey(snapshot); const readiness = readinessGeneration;
   readyBusy = true; $('ready').disabled = true; clearNotice();
   try {
-    if (player.ready && !session.rolesLocked) {
-      await client.request('/api/player/ready', { ready: false });
-    } else {
-      await recorder.enableMicrophone();
-      playback.unlock().catch(() => {});
-      if (!session.rolesLocked && !player.ready) await client.request('/api/player/ready', { ready: true });
-      $('ready-note').textContent = 'Microphone ready. You can record when the host starts.';
+    // Unlock audio on the READY gesture, before waiting for microphone permission.
+    playback.unlock().catch(() => {});
+    recorder.audioContext?.resume().catch(() => {});
+    await recorder.enableMicrophone();
+    if (!microphoneReady() || !client.state || roleKey(client.state) !== key || readiness !== readinessGeneration) return;
+    const latest = client.state;
+    const player = latest.session.players.find(item => item.id === latest.viewer.playerId);
+    if (latest.session.state === 'assignment' && !latest.session.rolesLocked && !player?.ready) {
+      try { await client.request('/api/player/ready', { ready: true }); }
+      catch (problem) {
+        // The host can start or lock roles while microphone permission is open.
+        if (client.state?.session.state === 'assignment' && !client.state.session.rolesLocked) throw problem;
+      }
     }
+    if (client.state && roleKey(client.state) === key && readiness === readinessGeneration) preparedRoles = key;
   } catch (problem) { error(problem); }
   finally { readyBusy = false; if (client.state) render(client.state); }
-});
-$('effect-row').addEventListener('click', event => {
-  const button = event.target.closest('button[data-effect]');
-  if (!button || button.disabled) return;
-  recorder.setEffect(button.dataset.effect);
-  for (const option of $('effect-row').querySelectorAll('button[data-effect]')) {
-    const selected = option === button;
-    option.classList.toggle('is-selected', selected); option.setAttribute('aria-pressed', String(selected));
-  }
 });
 client.addEventListener('connection', event => {
   clearTimeout(connectionTimer);
@@ -113,95 +118,219 @@ client.addEventListener('connection', event => {
   else connectionTimer = setTimeout(() => showNotice('Connection lost. Your take stays safe. Try again when the host is back.', 'connection'), 3500);
 });
 client.addEventListener('state', event => render(event.detail));
+client.addEventListener('microphone', () => { if (client.state) render(client.state); });
 
-function renderRoleSelection(snapshot) {
-  const session = snapshot.session; const pack = session.pack; const characters = pack?.characters || [];
-  const assignments = session.roleAssignments || {}; const players = session.players || [];
-  const me = players.find(player => player.id === snapshot.viewer.playerId);
-  const mine = snapshot.queue?.assignedCharacters || [];
-  const settings = session.settings || {}; const locked = !!session.rolesLocked;
+async function chooseLine(lineId) {
+  if (!client.state || lineId === selectedLineId) return;
+  const previous = selectedLineId;
+  if (['requesting', 'countdown', 'preroll', 'recording', 'settling', 'accepting'].includes(recorder.mode)) {
+    $('line-picker').value = previous || '';
+    return;
+  }
+  if ((recorder.hasUnacceptedTake() || recorder.retakeId || recorder.retakeAttemptPending) && !window.confirm('Discard your unaccepted take and leave this line?')) {
+    $('line-picker').value = previous || '';
+    return;
+  }
+  $('line-picker').disabled = true;
+  try {
+    if (recorder.hasUnacceptedTake() || recorder.retakeId || recorder.retakeAttemptPending) await recorder.discardCurrent();
+    selectedLineId = lineId || null;
+    render(client.state);
+  } catch (problem) {
+    error(problem);
+    $('line-picker').value = previous || '';
+  } finally {
+    if (client.state) $('line-picker').disabled = ['requesting', 'countdown', 'preroll', 'recording', 'settling', 'accepting'].includes(recorder.mode);
+  }
+}
+$('line-picker').addEventListener('change', () => chooseLine($('line-picker').value));
+$('cancel-retake').addEventListener('click', async () => {
+  $('cancel-retake').disabled = true;
+  try { await recorder.cancelActiveRetake(); }
+  catch (problem) { error(problem); }
+  finally { if (client.state) render(client.state); }
+});
+
+function renderAssignedCharacters(characters, pack) {
+  const list = $('my-roles');
+  const content = characters.map(character => {
+    const index = pack?.characters.indexOf(character) ?? -1;
+    return `${character} · ${index >= 0 ? pack.characterLineCounts?.[index] ?? 0 : 0} lines`;
+  });
+  if (JSON.stringify(content) === list.dataset.characters) return;
+  list.dataset.characters = JSON.stringify(content);
+  list.replaceChildren(...content.map(character => node('li', character)));
+}
+function renderCharacterOptions(snapshot, canPick) {
+  const pack = snapshot.session.pack; const list = $('character-options');
+  if (!pack) { list.replaceChildren(); return; }
+  const activeCharacter = document.activeElement?.dataset?.character;
+  const assignments = snapshot.session.roleAssignments || {}; const players = snapshot.session.players || [];
+  const mine = snapshot.queue?.assignedCharacters || []; const settings = snapshot.session.settings || {};
   const maxRoles = settings.allowMultipleRoles === false ? 1 : settings.maxRolesPerPlayer || Infinity;
-  const limitReached = mine.length >= maxRoles;
-  const freeCount = characters.filter(character => !assignments[character]).length;
-  $('role-counts').textContent = `${freeCount} free · ${characters.length - freeCount} taken`;
-  $('my-roles').textContent = mine.length ? mine.join(' · ') : 'Choose a character to begin';
-  $('role-help').textContent = locked ? 'Roles are locked. Your choices are saved.' : settings.freeRolePicking === false ? 'The host is choosing characters. You can look around and mark yourself ready once your role is set.' : settings.allowMultipleRoles === false ? 'Tap one free character to claim it. You can release it before the host locks roles.' : `Tap a free character to claim it. You can choose up to ${Number.isFinite(maxRoles) ? maxRoles : 'any number'}.`;
-  const list = $('role-options'); const activeCharacter = document.activeElement?.dataset?.character; const activeAction = document.activeElement?.dataset?.action;
+  const limitReached = mine.length >= maxRoles; let free = 0; let taken = 0;
   list.replaceChildren();
-  for (const character of characters) {
-    const owner = players.find(player => player.id === assignments[character]);
-    const isMine = owner?.id === snapshot.viewer.playerId;
-    const card = node('article', undefined, `role-tile${isMine ? ' is-mine' : ''}${owner ? ' is-taken' : ' is-free'}`);
-    const name = node('strong', character); const taken = node('span', owner ? (isMine ? 'Yours' : `Taken by ${owner.nickname}`) : 'Free', 'role-state');
-    const button = node('button', undefined, isMine ? 'release-role' : 'claim-role');
-    button.type = 'button'; button.dataset.character = character; button.dataset.action = isMine ? 'release' : 'claim';
-    const busy = roleBusy.has(character);
-    button.textContent = busy ? '…' : isMine ? '− Release' : owner ? 'Taken' : settings.freeRolePicking === false ? 'Host assigns' : '+ Claim';
-    button.disabled = busy || locked || (isMine ? false : !!owner || !settings.freeRolePicking || limitReached);
-    button.setAttribute('aria-label', isMine ? `Release ${character}` : owner ? `${character}, taken by ${owner.nickname}` : `Claim ${character}`);
-    card.append(name, taken, button); list.append(card);
+  for (const [index, character] of pack.characters.entries()) {
+    const ownerId = assignments[character]; const owner = players.find(player => player.id === ownerId);
+    const isMine = ownerId === snapshot.viewer.playerId;
+    if (owner) taken++; else free++;
+    const card = node('div', undefined, `character-option${isMine ? ' is-mine' : ''}`); card.setAttribute('role', 'listitem');
+    const name = node('strong', character); const count = node('small', `${pack.characterLineCounts?.[index] ?? 0} lines · ${owner ? isMine ? 'Yours' : `Taken by ${owner.nickname}` : 'Free'}`);
+    const button = node('button', isMine ? 'Release' : owner ? 'Taken' : settings.freeRolePicking === false ? 'Host assigns' : 'Choose');
+    button.type = 'button'; button.dataset.character = character;
+    const pendingKey = `${snapshot.session.matchId}:${character}`;
+    button.disabled = !canPick || rolePending.has(pendingKey) || settings.freeRolePicking === false || (isMine ? false : !!owner || limitReached);
+    button.setAttribute('aria-label', isMine ? `Release ${character}` : owner ? `${character}, taken by ${owner.nickname}` : settings.freeRolePicking === false ? `${character}, host assigns this role` : `Choose ${character}`);
+    button.addEventListener('click', () => changeRole(character, isMine ? 'release' : 'claim'));
+    card.append(name, count, button); list.append(card);
   }
-  if (activeCharacter && activeAction) {
-    list.querySelector(`button[data-character="${CSS.escape(activeCharacter)}"]`)?.focus({ preventScroll: true });
+  const limit = Number.isFinite(maxRoles) ? maxRoles : 'no limit';
+  $('role-counts').textContent = `${free} free · ${taken} taken · ${mine.length} of ${limit} chosen`;
+  $('role-help').textContent = !canPick ? 'Role selection is locked. Check your microphone and wait for the host.'
+    : settings.freeRolePicking === false ? 'The host is choosing roles. Check your microphone while you wait.'
+      : `Choose at least one free character. You can take up to ${limit} ${limit === 1 ? 'role' : 'roles'}.`;
+  if (activeCharacter) list.querySelector(`button[data-character="${CSS.escape(activeCharacter)}"]`)?.focus({ preventScroll: true });
+}
+async function changeRole(character, action) {
+  const requestMatchId = client.state?.session.matchId; const pendingKey = `${requestMatchId}:${character}`;
+  if (rolePending.has(pendingKey)) return;
+  rolePending.add(pendingKey); clearNotice();
+  if (client.state) render(client.state);
+  try { await client.request(`/api/player/${action}`, { character }); }
+  catch (problem) {
+    if (problem.status === 409 || problem.status === 403) await client.request('/api/state?viewer=player').catch(() => {});
+    error(problem);
+  } finally {
+    rolePending.delete(pendingKey);
+    if (client.state) render(client.state);
   }
-  $('ready').disabled = readyBusy || !mine.length || (locked && !!me?.ready);
-  $('ready-label').textContent = me?.ready ? (locked ? 'Ready' : 'Not ready') : locked ? 'Check my mic' : 'I’m ready';
-  $('ready-note').textContent = me?.ready ? locked ? 'You’re ready. The host will start the game.' : 'You’re marked ready.' : locked ? 'Tap to check microphone access before the first line.' : 'Get your microphone ready, then wait for the host.';
 }
 function render(snapshot) {
   if (snapshot.viewer.kind !== 'player') return;
   const session = snapshot.session; const pack = session.pack; const queue = snapshot.queue;
   if (roomId && session.id !== roomId) return;
-  $('join-panel').hidden = true; $('room-panel').hidden = false;
-  $('pack-title').textContent = pack?.metadata.title || 'Your dub';
-  const currentRoleKey = JSON.stringify([session.id, [...(queue?.assignedCharacters || [])].sort()]);
-  if (rolesFingerprint !== currentRoleKey) { rolesFingerprint = currentRoleKey; $('ready-note').textContent = ''; }
-  const roleStage = session.state === 'assignment';
+  if (currentMatchId !== session.matchId) {
+    currentMatchId = session.matchId; selectedLineId = null; preparedRoles = null; rolesFingerprint = null;
+    rolePending.clear(); readinessGeneration++;
+  }
+  const player = session.players.find(item => item.id === snapshot.viewer.playerId);
+  const currentRoleKey = roleKey(snapshot);
+  if (rolesFingerprint !== currentRoleKey || (previousRolesLocked && !session.rolesLocked) || (previousServerReady && !player?.ready) || (session.state === 'assignment' && previousPhase && previousPhase !== 'assignment')) {
+    preparedRoles = null; readinessGeneration++;
+  }
+  rolesFingerprint = currentRoleKey; previousServerReady = !!player?.ready; previousPhase = session.state; previousRolesLocked = !!session.rolesLocked;
+  const lineMode = session.settings.gameMode === 'line';
+  const hasTasks = !!queue?.lines.length;
+  const prepared = preparedRoles === currentRoleKey && microphoneReady();
+  const ownedLineIds = queue?.lines || [];
+  if (selectedLineId && !ownedLineIds.includes(selectedLineId)) selectedLineId = null;
+  if (!selectedLineId && queue?.pendingLines?.length) selectedLineId = queue.pendingLines[0];
+  const line = pack?.lines.find(item => item.id === selectedLineId);
   const finalPlayback = session.state === 'playback';
-  const lineId = queue?.pendingLines[0]; const line = pack?.lines.find(item => item.id === lineId);
-  const recording = session.state === 'recording' && !!line;
-  const pausedLine = session.state === 'paused' && !!line;
-  if (pausedLine) recorder.pauseCapture();
-  const done = ['recording', 'review', 'paused'].includes(session.state) && !!queue?.lines.length && !line;
-  $('role-panel').hidden = !roleStage;
+  const hasUnfinishedRequiredLine = session.completedLineCount < session.totalLineCount;
+  const needsReady = (session.state === 'assignment' && hasTasks) || (session.state === 'recording' && hasTasks && hasUnfinishedRequiredLine && !prepared);
+  const recordingLine = ['recording', 'review', 'paused'].includes(session.state) && !!line && hasTasks;
+  const recording = recordingLine && !needsReady;
+  const ownedActiveRetake = line && session.activeRetakes?.find(item => item.lineId === line.id && item.playerId === snapshot.viewer.playerId);
+  const hasRetakeAttemptForTab = !!(recorder.retakeId || recorder.retakeAttemptPending);
+  const lineAllowed = canRecordSelectedLine({
+    state: session.state, hasTasks, lineId: line?.id, prepared, hasUnfinishedRequiredLine,
+    activeRetakeLineId: ownedActiveRetake?.lineId, hasRetakeAttemptForTab,
+  });
+  const done = ['recording', 'review', 'paused'].includes(session.state) && hasTasks && !queue.pendingLines.length;
+  if (session.state === 'paused' || (needsReady && recordingLine)) recorder.pauseCapture();
+  $('join-panel').hidden = true; $('room-panel').hidden = false;
+  $('pack-title').textContent = pack?.metadata.title || 'Your party';
+  $('pack-title').parentElement.hidden = finalPlayback;
+  $('role-panel').hidden = !needsReady;
   $('recording-panel').hidden = !recording;
   $('playback-panel').hidden = !finalPlayback;
-  $('waiting-panel').hidden = roleStage || recording || finalPlayback;
-  $('line-number').hidden = !recording;
-  $('effect-row').hidden = !session.settings?.voiceEffectsEnabled;
-  $('effect-row').querySelectorAll('button').forEach(button => { button.disabled = !session.settings?.voiceEffectsEnabled || ['recording', 'countdown', 'requesting'].includes(recorder.mode); });
-  document.body.classList.toggle('compact-controls', !!session.settings?.compactMobilePreferred && window.matchMedia('(max-width: 700px)').matches);
-  recorder.setLine(pack, recording || pausedLine ? line : null, recording || pausedLine, session.settings);
+  $('waiting-panel').hidden = needsReady || recording || finalPlayback;
+  const showLineNavigation = hasTasks && ['recording', 'review', 'paused'].includes(session.state);
+  $('line-navigation').hidden = !showLineNavigation;
+  const picker = $('line-picker'); const selectedWasFocused = document.activeElement === picker;
+  picker.replaceChildren();
+  if (done && ownedLineIds.length && !selectedLineId) {
+    const option = node('option', 'DONE · choose an accepted line to review'); option.value = ''; picker.append(option);
+  }
+  for (const lineId of ownedLineIds) {
+    const item = pack.lines.find(candidate => candidate.id === lineId); if (!item) continue;
+    const index = pack.lines.indexOf(item); const accepted = session.lineTakes[item.id]?.status === 'accepted';
+    const replacement = session.replacementTakes?.[item.id];
+    const status = replacement ? 'Replacement ready' : accepted ? 'Accepted' : session.lineTakes[item.id]?.status === 'recorded' ? 'Ready for NEXT' : 'Needs a take';
+    const caption = item.caption.length > 48 ? `${item.caption.slice(0, 45)}…` : item.caption;
+    const option = node('option', `LINE ${index + 1} · ${item.character} · ${caption} · ${status}`);
+    option.value = item.id; picker.append(option);
+  }
+  if (!ownedLineIds.length) { const option = node('option', 'No lines assigned'); option.value = ''; picker.append(option); }
+  picker.value = selectedLineId || '';
+  picker.disabled = ['requesting', 'countdown', 'preroll', 'recording', 'settling', 'accepting'].includes(recorder.mode);
+  if (selectedWasFocused && !picker.disabled) picker.focus({ preventScroll: true });
+  $('done-indicator').hidden = !done;
+  $('done-indicator').textContent = done ? `DONE · ${queue.completedLines.length} of ${queue.lines.length} assigned lines accepted` : '';
+  if (recorder.retakeId && !ownedActiveRetake && !session.replacementTakes?.[line?.id]) {
+    recorder.retakeId = ''; recorder.retakeAttemptId = ''; recorder.retakeAttemptPending = false;
+  } else if (recorder.retakeAttemptPending && !ownedActiveRetake && !session.replacementTakes?.[line?.id] && session.state !== 'recording') {
+    recorder.retakeAttemptId = ''; recorder.retakeAttemptPending = false;
+  }
+  $('cancel-retake').hidden = !(recorder.retakeId || recorder.retakeAttemptPending);
+  $('cancel-retake').disabled = picker.disabled;
+  const viewLine = recordingLine && !needsReady ? line : null;
+  recorder.setLine(pack, viewLine, lineAllowed && !needsReady, session.settings, session.state === 'paused', session.matchId);
+  if (viewLine) recorder.setTakes(session.lineTakes[line.id], session.lineTakes[line.id]?.status === 'accepted' ? session.lineTakes[line.id] : null, session.replacementTakes?.[line.id]);
   if (recording) {
-    recorder.setCandidate(session.lineTakes[line.id]);
+    $('line-number').hidden = false;
     $('line-number').textContent = `LINE ${queue.lines.indexOf(line.id) + 1} / ${queue.lines.length}`;
     $('line-character').textContent = line.character;
     $('line-caption').textContent = line.caption;
+    if (visibleMode !== 'recording') requestAnimationFrame(() => recorder.drawWaveform());
+  } else $('line-number').hidden = true;
+  if (needsReady) {
+    $('role-title').textContent = lineMode ? 'Check your line assignments' : 'Choose your characters';
+    $('character-options').hidden = lineMode;
+    $('line-setup-summary').hidden = !lineMode;
+    $('my-roles').parentElement.hidden = lineMode;
+    if (lineMode) {
+      renderAssignedCharacters([], pack);
+      const assigned = pack?.lines.filter(item => queue.lines.includes(item.id)) || [];
+      const characters = [...new Set(assigned.map(item => item.character))];
+      $('assigned-line-count').textContent = `${assigned.length} assigned ${assigned.length === 1 ? 'line' : 'lines'}`;
+      $('assigned-character-summary').textContent = characters.length ? `Characters: ${characters.map(character => `${character} (${assigned.filter(item => item.character === character).length})`).join(' · ')}` : 'The host will deal lines among connected players.';
+      $('role-counts').textContent = `${assigned.length} assigned lines · ${characters.length} ${characters.length === 1 ? 'character' : 'characters'}`;
+    } else {
+      renderCharacterOptions(snapshot, session.state === 'assignment' && !session.rolesLocked);
+      renderAssignedCharacters(queue?.assignedCharacters || [], pack);
+    }
+    $('role-help').textContent = lineMode
+      ? 'Review your assigned lines and character summaries, then check your microphone.'
+      : $('role-help').textContent;
+    $('role-key-help').textContent = lineMode
+      ? 'Use Tab to review your line summary and microphone controls.'
+      : 'Use Tab and Enter to choose characters or check your microphone.';
+    $('ready').disabled = readyBusy || !hasTasks;
+    $('ready').setAttribute('aria-pressed', String(prepared));
+    $('microphone-status').textContent = prepared ? 'Microphone ready. You can wait for the host.' : microphoneReady() ? 'Microphone connected. Press READY to confirm.' : 'Allow microphone access, then press READY.';
   }
-  if (roleStage) renderRoleSelection(snapshot);
-  if (session.state === 'lobby') {
-    $('waiting-title').textContent = 'You’re in the lobby';
-    $('waiting-message').textContent = 'The host is setting up your game. Your characters will show up here.';
-    $('waiting-detail').hidden = true;
+  $('waiting-detail').hidden = true;
+  if (done) {
+    $('waiting-title').textContent = 'DONE';
+    $('waiting-message').textContent = `You accepted all ${queue.lines.length} assigned lines.`;
+    $('waiting-detail').textContent = session.activeRetakes?.length ? 'A replacement retake is holding completion open.' : 'Waiting for everyone else...';
+    $('waiting-detail').hidden = false;
   } else if (session.state === 'paused') {
-    $('waiting-title').textContent = 'Taking a quick pause';
-    $('waiting-message').textContent = 'The host will continue the game soon.';
-    $('waiting-detail').hidden = true;
+    $('waiting-title').textContent = 'Paused'; $('waiting-message').textContent = 'Waiting for the host to continue.';
   } else if (session.state === 'review') {
-    $('waiting-title').textContent = done ? 'Your part is done' : 'The host is reviewing takes';
-    $('waiting-message').textContent = done ? `You recorded all ${queue.lines.length} of your lines.` : 'Hang tight while the host checks the recordings.';
-    $('waiting-detail').hidden = !done; $('waiting-detail').textContent = 'Waiting for everyone else.';
-  } else if (session.state === 'recording') {
-    $('waiting-title').textContent = done ? 'Your part is done' : 'Waiting for your characters';
-    $('waiting-message').textContent = done ? `You recorded all ${queue.lines.length} of your lines.` : 'The host will assign your characters before your first line.';
-    $('waiting-detail').hidden = !done; $('waiting-detail').textContent = 'Waiting for everyone else.';
+    $('waiting-title').textContent = 'Waiting for the host'; $('waiting-message').textContent = 'The host is reviewing the recordings.';
+  } else if (session.state === 'lobby' && !pack) {
+    $('waiting-title').textContent = 'Party is ready'; $('waiting-message').textContent = 'The host will choose a pack. Stay on this page for the next match.';
+  } else if (!hasTasks && session.state !== 'lobby') {
+    $('waiting-title').textContent = lineMode ? 'Waiting for lines' : 'Waiting for your characters';
+    $('waiting-message').textContent = lineMode ? 'You have no lines yet. Your host can deal lines or assign them to you. You do not need to enable your microphone.' : 'Your host will assign your characters.';
   } else {
-    $('waiting-title').textContent = 'Waiting for the host';
-    $('waiting-message').textContent = 'The host is getting the game ready.';
-    $('waiting-detail').hidden = true;
+    $('waiting-title').textContent = 'Waiting for the host'; $('waiting-message').textContent = 'The host will start recording soon.';
   }
   playback.setState(snapshot);
-  const nextMode = finalPlayback ? 'playback' : roleStage ? 'roles' : recording ? 'recording' : 'waiting';
+  const nextMode = finalPlayback ? 'playback' : needsReady ? 'roles' : recording ? 'recording' : 'waiting';
   const changed = visibleMode !== nextMode; visibleMode = nextMode;
   if (changed) requestAnimationFrame(() => {
     if (visibleMode !== nextMode) return;
@@ -209,6 +338,16 @@ function render(snapshot) {
     if (focus && !focus.disabled) focus.focus({ preventScroll: true });
   });
 }
+
+document.addEventListener('keydown', event => {
+  if (event.altKey || event.ctrlKey || event.metaKey || event.repeat) return;
+  const target = event.target;
+  if (target?.matches?.('input,textarea,select,[contenteditable="true"],button')) return;
+  if ($('recording-panel').hidden) return;
+  const control = ({ o: 'original', r: 'record', t: 'my-take', n: 'next' })[event.key.toLowerCase()];
+  if (!control || $(control).disabled) return;
+  event.preventDefault(); $(control).click();
+});
 
 client.start().catch(() => { /* New visitors join with the host invitation. */ });
 window.addEventListener('focus', () => { if (client.state) client.request('/api/state?viewer=player').catch(() => {}); });

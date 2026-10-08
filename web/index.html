@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#11101a">
+  <meta name="theme-color" content="#121212">
   <title>Open Dub</title>
   <link rel="stylesheet" href="/player/styles.css">
 </head>
 <body>
-  <a href="#stage" class="skip-link">Skip to the game</a>
+  <a href="#stage" class="skip-link">Skip to recording</a>
   <main id="stage" class="stage">
     <header class="stage-header">
       <h1 id="pack-title">Join the dub</h1>
@@ -16,58 +16,74 @@
     </header>
     <p id="notice" class="notice" role="alert" hidden></p>
     <section id="join-panel" class="quiet-screen">
-      <div class="welcome-mark" aria-hidden="true">♫</div>
-      <h2 id="join-heading">What should we call you?</h2>
+      <h2 id="join-heading">Your name</h2>
       <p id="invitation-missing" hidden>Open the invitation from your host to join.</p>
       <form id="join-form" class="join-form">
         <label for="nickname">Your name</label>
         <input id="nickname" name="nickname" autocomplete="nickname" maxlength="40" aria-describedby="notice" required>
-        <button id="join-button" type="submit"><span aria-hidden="true">➜</span><span>Join game</span></button>
+        <button id="join-button" type="submit">JOIN</button>
       </form>
     </section>
     <div id="room-panel" hidden>
       <section id="role-panel" class="roles-screen" hidden aria-labelledby="role-title">
-        <div class="section-intro">
-          <p class="eyebrow">PICK YOUR PART</p>
-          <h2 id="role-title" tabindex="-1">Choose your characters</h2>
-          <p id="role-help">Tap any free character to claim it. You can take more than one.</p>
-          <p id="role-counts" class="role-counts" aria-live="polite"></p>
-        </div>
-        <div id="role-options" class="role-options" aria-label="Available characters"></div>
-        <div class="my-role-line"><span>Your roles</span><strong id="my-roles">Choose a character to begin</strong></div>
-        <div class="ready-row"><button id="ready" type="button"><span aria-hidden="true">✓</span><span id="ready-label">I’m ready</span></button><p id="ready-note" role="status" aria-live="polite"></p></div>
+        <div class="section-intro"><p class="eyebrow">ASSIGNMENT</p><h2 id="role-title" tabindex="-1">Choose your characters</h2><p id="role-help">Choose at least one character, then check your microphone.</p><p id="role-counts" class="role-counts" aria-live="polite"></p></div>
+        <div id="character-options" class="character-options" role="list" aria-label="Pack characters"></div>
+        <div class="my-role-line"><span>Your characters</span><ul id="my-roles" class="assigned-characters" aria-label="Your characters"></ul></div>
+        <div id="line-setup-summary" class="line-setup-summary" hidden><strong id="assigned-line-count"></strong><p id="assigned-character-summary" class="muted"></p></div>
+        <label class="mic-gain-control" for="mic-gain"><span>Amplify microphone <output id="mic-gain-value" for="mic-gain">100%</output></span><input id="mic-gain" type="range" min="0" max="300" step="5" value="100"></label>
+        <div id="microphone-meter-wrap" class="microphone-meter-wrap" hidden><span>Microphone level</span><canvas id="live-microphone-meter" height="14" role="img" aria-label="Live microphone level"></canvas></div>
+        <p id="microphone-status" class="microphone-status" role="status" aria-live="polite">Microphone not enabled</p>
+        <button id="ready" type="button" aria-keyshortcuts="Enter">READY</button>
+        <p id="role-key-help" class="keyboard-help">Use Tab and Enter to choose characters or check your microphone.</p>
       </section>
       <section id="waiting-panel" class="quiet-screen" hidden aria-labelledby="waiting-title">
-        <div class="welcome-mark" aria-hidden="true">♫</div>
         <h2 id="waiting-title" tabindex="-1">Waiting for the host</h2>
-        <p id="waiting-message">The host is getting the game ready.</p>
+        <p id="waiting-message">The host is getting the recording ready.</p>
         <p id="waiting-detail" hidden></p>
       </section>
-      <section id="recording-panel" class="game-panel" hidden aria-label="Record your line">
-        <div class="video-frame"><video id="line-video" muted playsinline preload="metadata" aria-label="Scene for your line"></video><div id="countdown" class="countdown" role="status" aria-live="assertive" hidden></div></div>
-        <div class="line-content"><h2 id="line-character"></h2><p id="line-caption" class="caption"></p></div>
-        <canvas id="recording-waveform" class="waveform" height="72" aria-hidden="true"></canvas>
-        <progress id="recording-progress" class="recording-progress" max="1" value="0" aria-label="Recording progress" hidden></progress>
-        <div id="effect-row" class="effect-row" role="group" aria-label="Voice effect" hidden>
-          <span class="effect-title">Voice effect</span>
-          <div class="effect-options">
-            <button type="button" class="effect-chip is-selected" data-effect="normal" aria-pressed="true">Normal</button>
-            <button type="button" class="effect-chip" data-effect="echo" aria-pressed="false">Echo</button>
-            <button type="button" class="effect-chip" data-effect="phone" aria-pressed="false">Phone</button>
-            <button type="button" class="effect-chip" data-effect="robot" aria-pressed="false">Robot</button>
-          </div>
-        </div>
-        <div class="recording-controls" role="group" aria-label="Line controls">
-          <button id="original" type="button" class="secondary" aria-label="Play original line"><span class="control-icon" aria-hidden="true">♫</span><span class="control-label">Original</span></button>
-          <button id="record" type="button" class="record-button" aria-label="Record your line"><span class="control-icon" aria-hidden="true">●</span><span class="control-label">Record</span></button>
-          <button id="my-take" type="button" class="secondary" aria-label="Play my take"><span class="control-icon" aria-hidden="true">↻</span><span class="control-label">My take</span></button>
-          <button id="next" type="button" aria-label="Save take and continue"><span class="control-icon" aria-hidden="true">➜</span><span class="control-label">Next</span></button>
-        </div>
-        <p id="recorder-status" class="recorder-status" role="status" aria-live="polite"></p>
-        <audio id="reference-audio" preload="none" hidden></audio><audio id="take-review" preload="none" hidden></audio>
+      <section id="line-navigation" class="line-navigation" hidden aria-label="Assigned line navigation">
+        <label for="line-picker">Go to your line</label>
+        <select id="line-picker"></select>
+        <p id="done-indicator" role="status" hidden></p>
+        <button id="cancel-retake" type="button" class="secondary" hidden>Cancel retake</button>
       </section>
-      <section id="playback-panel" class="final-screen" hidden aria-label="Watch the dub">
-        <p class="eyebrow">THE FINISHED DUB</p><h2>You made this together</h2><div id="playback-root"></div>
+      <section id="recording-panel" class="recording-panel" hidden aria-label="Record your line">
+        <div class="video-frame">
+          <video id="line-video" muted playsinline preload="metadata" aria-label="Scene for your line"></video>
+          <div id="countdown" class="countdown" role="status" aria-live="assertive" hidden></div>
+        </div>
+        <div class="line-content">
+          <h2 id="line-character"></h2>
+          <p id="line-caption" class="caption"></p>
+        </div>
+        <p id="waveform-legend" class="waveform-legend"><span><i class="reference-swatch"></i>Original</span><span><i class="take-swatch"></i>Your take</span><span id="waveform-status" role="status">Loading original waveform…</span></p>
+        <canvas id="recording-waveform" class="waveform" height="72" aria-hidden="true"></canvas>
+        <div id="microphone-meter-wrap-recording" class="microphone-meter-wrap" hidden><span>Microphone level</span><canvas id="live-microphone-meter-recording" height="14" role="img" aria-label="Live microphone level"></canvas></div>
+        <label class="mic-gain-control recording-gain" for="mic-gain-recording"><span>Amplify microphone <output id="mic-gain-value-recording" for="mic-gain-recording">100%</output></span><input id="mic-gain-recording" type="range" min="0" max="300" step="5" value="100"></label>
+        <progress id="recording-progress" class="recording-progress" max="1" value="0" aria-label="Recording progress" hidden></progress>
+        <div class="recording-controls" role="group" aria-label="Line controls">
+          <button id="original" type="button" aria-label="Play original line" aria-keyshortcuts="O">ORIGINAL</button>
+          <div class="record-action">
+            <label class="skip-countdown" for="skip-countdown">
+              <input id="skip-countdown" type="checkbox">
+              <span>Skip countdown</span>
+            </label>
+            <button id="record" type="button" class="record-button" aria-label="Record your line" aria-keyshortcuts="R">RECORD</button>
+          </div>
+          <button id="my-take" type="button" aria-label="Play my take" aria-keyshortcuts="T" disabled>MY TAKE</button>
+          <button id="next" type="button" aria-label="Next: accept take and continue" aria-keyshortcuts="N" disabled>NEXT</button>
+        </div>
+        <div id="effect-row" class="effect-row" role="group" aria-label="Voice effects">
+          <span class="effect-label">Voice effect</span>
+        </div>
+        <p id="effect-capability" class="help" role="status" aria-live="polite" hidden></p>
+        <p id="recorder-status" class="recorder-status" role="status" aria-live="polite"></p>
+        <p class="keyboard-help">Keyboard shortcuts: O original · R record or stop · T play your take · N accept and continue.</p>
+        <audio id="reference-audio" preload="none" hidden></audio>
+        <audio id="take-review" preload="none" hidden></audio>
+      </section>
+      <section id="playback-panel" class="final-screen" hidden aria-label="Watch the final dub">
+        <div id="playback-root"></div>
       </section>
     </div>
   </main>

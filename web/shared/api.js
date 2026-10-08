@@ -4,21 +4,33 @@ export class RuntimeClient extends EventTarget {
     this.bestRtt = Infinity; this.reconnectTimer = null; this.pingSent = 0;
     this.active = false;
   }
-  async request(path, body, { multipart = false, method } = {}) {
+  async request(path, body, { multipart = false, method, retakeId } = {}) {
+    const matchId = this.state?.session?.matchId;
+    const partyOnly = ['/api/admin/packs', '/api/admin/login', '/api/admin/create-party', '/api/admin/next-match', '/api/admin/select', '/api/admin/settings'].includes(path);
+    const matchScoped = path.startsWith('/api/player/') || /^\/api\/takes\/[^/]+(?:\/accept|\/retake(?:\/cancel)?|\/discard)?$/.test(path) || (path.startsWith('/api/admin/') && !partyOnly);
+    if (body !== undefined && !multipart && matchId && matchScoped) {
+      body = { ...body, matchId };
+    }
+    const headers = body !== undefined && !multipart ? { 'Content-Type': 'application/json' } : {};
+    if (path === '/api/admin/select' && this.state?.session?.partyCreated) body = { ...body, partyId: this.state.session.id };
+    if (multipart && path.startsWith('/api/takes/') && matchId) headers['X-Match-ID'] = matchId;
+    if (multipart && retakeId) headers['X-Retake-ID'] = retakeId;
     const response = await fetch(path, {
       method: method || (body === undefined ? 'GET' : 'POST'),
       credentials: 'same-origin', cache: 'no-store',
-      headers: body !== undefined && !multipart ? { 'Content-Type': 'application/json' } : {},
+      headers,
       body: body === undefined ? undefined : multipart ? body : JSON.stringify(body)
     });
     let result;
     try { result = await response.json(); } catch { throw new Error(`Server returned ${response.status}.`); }
-    if (!response.ok) throw new Error(result.error || `Request failed (${response.status}).`);
+    if (!response.ok) { const error = new Error(result.error || `Request failed (${response.status}).`); error.status = response.status; throw error; }
     if (result.type === 'state') this.receive(result);
     return result;
   }
   receive(next) {
-    if (this.state && next.session?.id === this.state.session?.id && next.revision < this.state.revision) return;
+    const sameServer = next.serverId && next.serverId === this.state?.serverId;
+    const sameParty = next.session?.id === this.state?.session?.id;
+    if (this.state && (sameServer || sameParty) && next.revision < this.state.revision) return;
     if (!Number.isFinite(next.serverTime) || !next.session) return;
     if (!Number.isFinite(this.bestRtt)) this.clockOffset = next.serverTime - Date.now();
     this.state = next; this.dispatchEvent(new CustomEvent('state', { detail: next }));

@@ -48,14 +48,14 @@ export class DubPlayback {
   }
   key(session = this.session) {
     if (!session?.pack) return '';
-    return `${session.pack.id}:${Object.values(session.lineTakes).filter(t => t.status === 'accepted').map(t => t.id).sort().join(',')}`;
+    return `${session.matchId || ''}:${session.pack.id}:${Object.values(session.lineTakes).filter(t => t.status === 'accepted').map(t => t.id).sort().join(',')}`;
   }
   setState(snapshot) {
     if (this.player) { this.setPlayerState(snapshot); return; }
     const previous = this.session; this.session = snapshot.session;
     const pack = this.session.pack;
     this.prepareButton.disabled = !pack || this.preparing;
-    if (previous?.pack?.id !== pack?.id || previous?.pack?.videoUrl !== pack?.videoUrl) {
+    if (previous?.matchId !== this.session.matchId || previous?.pack?.id !== pack?.id || previous?.pack?.videoUrl !== pack?.videoUrl) {
       this.stop(); this.buffers.clear(); this.readyKey = null; this.generation++;
       if (pack) { this.video.src = pack.videoUrl; mediaWarning(this.video, this.warning); }
       else { this.video.removeAttribute('src'); this.video.load(); }
@@ -122,7 +122,7 @@ export class DubPlayback {
   setPlayerState(snapshot) {
     const previous = this.session; this.session = snapshot.session;
     const pack = this.session.pack;
-    if (previous?.id !== this.session.id || previous?.pack?.id !== pack?.id || previous?.pack?.videoUrl !== pack?.videoUrl) {
+    if (previous?.id !== this.session.id || previous?.matchId !== this.session.matchId || previous?.pack?.id !== pack?.id || previous?.pack?.videoUrl !== pack?.videoUrl) {
       this.playCommand++; this.playIntent = false; this.suppressedId = null; this.stop();
       this.generation++; this.buffers.clear(); this.readyKey = null; this.failedKey = null; this.reportedFailedKey = null;
       this.videoFailed = false;
@@ -261,7 +261,7 @@ export class DubPlayback {
             let buffer;
             try { buffer = await context.decodeAudioData(bytes); }
             catch { throw new Error('A recorded take or backing track could not decode in this browser. Try the browser used to record those takes. Reference audio is never substituted.'); }
-            this.buffers.set(asset.key, buffer);
+            if (generation === this.generation) this.buffers.set(asset.key, buffer);
           }
           done++; if (generation === this.generation) this.status.textContent = `Prepared ${done} / ${assets.length} audio files…`;
         }

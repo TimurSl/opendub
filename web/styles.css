@@ -102,6 +102,10 @@ footer { max-width:1260px; padding:0 24px 24px; margin:auto; color:var(--muted);
 .eyebrow { margin:0 0 8px; color:#52677b; font-size:11px; font-weight:800; letter-spacing:.13em; }
 .pack-list .pack { align-items:center; }
 .pack-list-actions { display:flex; justify-content:flex-end; margin-bottom:8px; }
+.pack-filter-controls { display:grid; grid-template-columns:minmax(220px,2fr) repeat(2,minmax(140px,1fr)) auto; align-items:end; gap:10px; margin:12px 0 18px; }
+.pack-filter-controls label { margin:0; font-size:13px; }
+.pack-filter-controls input { display:block; margin-top:4px; }
+.pack-filter-controls p { grid-column:1/-1; margin:0; color:var(--muted); font-size:14px; }
 .pack-icon { display:grid; place-items:center; color:#fff; background:linear-gradient(145deg,#7758bd,#294f79); font-weight:900; font-size:21px; }
 .pack-list .pack button { flex:0 0 auto; }
 .invite-block { margin:20px 0 24px; padding:18px; border:1px solid #d0dce6; border-radius:8px; background:#f8fbfd; }
@@ -174,6 +178,8 @@ footer { max-width:1260px; padding:0 24px 24px; margin:auto; color:var(--muted);
   .stage-nav li > button > span { width:29px; height:29px; flex-basis:29px; }
   .pack-list .pack { align-items:flex-start; }
   .pack-list .pack button { width:100%; }
+  .pack-filter-controls { grid-template-columns:1fr 1fr; }
+  .pack-filter-controls label:first-child, .pack-filter-controls p { grid-column:1/-1; }
   .copy-field { align-items:stretch; }
   .copy-field button { width:100%; }
   .settings-actions { display:grid; grid-template-columns:1fr; }

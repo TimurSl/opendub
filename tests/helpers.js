@@ -31,6 +31,19 @@ export async function makeFixture(t, { lines = fixtureLines } = {}) {
   return { root, workshopDir, packDir, dataDir };
 }
 
+export async function addFixturePack(workshopDir, name, lines) {
+  const packDir = path.join(workshopDir, name);
+  await mkdir(packDir, { recursive: true });
+  await writeFile(path.join(packDir, '_pack_info.ini'), `[data]\n\ntitle=${JSON.stringify(name)}\nauthors=["Runtime tests"]\nlanguage="ENG"\n`);
+  await writeFile(path.join(packDir, 'dub_video.ogv'), Buffer.from('OggS synthetic video fixture'));
+  await writeFile(path.join(packDir, '_backing_track.ogg'), Buffer.from('OggS synthetic backing fixture'));
+  for (const line of lines) {
+    await writeFile(path.join(packDir, `${line.id}.ini`), `[data]\ncaption=${JSON.stringify(`Caption for ${line.id}`)}\ndub_timestamps=[${line.start}]\ndub_ends=[${line.end}]\ndub_characters=[${JSON.stringify(line.character)}]\n`);
+    await writeFile(path.join(packDir, `${line.id}.mp3`), Buffer.from('ID3 synthetic reference fixture'));
+  }
+  return packDir;
+}
+
 // The HTTP layer checks container signatures, not codec semantics. Browser media
 // decoding is covered by browser validation; synthetic tests carry no pack media.
 export const webmBytes = Buffer.concat([
@@ -47,6 +60,7 @@ export async function startFixtureRuntime(t, options = {}) {
   const bound = typeof address === 'object' && address !== null ? address : runtime.server.address();
   const base = `http://127.0.0.1:${bound.port}`;
   let closed = false;
+  let currentMatchId = null;
   async function stop() {
     if (!closed) { closed = true; await runtime.close(); }
   }
@@ -67,11 +81,19 @@ export async function startFixtureRuntime(t, options = {}) {
     try { data = text ? JSON.parse(text) : null; } catch { data = text; }
     return { response, status: response.status, data };
   }
-  const admin = (route, body) => request(route, { token: adminToken, ...(body === undefined ? {} : { method: 'POST', body }) });
+  const admin = async (route, body) => {
+    const partyOnly = ['/api/admin/packs', '/api/admin/create-party', '/api/admin/next-match', '/api/admin/select', '/api/admin/settings'].includes(route);
+    const payload = body === undefined ? undefined : !partyOnly && currentMatchId ? { ...body, matchId: body.matchId ?? currentMatchId } : body;
+    const result = await request(route, { token: adminToken, ...(payload === undefined ? {} : { method: 'POST', body: payload }) });
+    if (result.data?.session) currentMatchId = result.data.session.matchId;
+    return result;
+  };
   async function select() {
+    const party = await admin('/api/admin/create-party', {});
+    if (party.status !== 200) throw new Error(`Cannot create fixture party: ${JSON.stringify(party.data)}`);
     const result = await admin('/api/admin/packs');
     if (result.status !== 200) throw new Error(`Cannot list fixture packs: ${JSON.stringify(result.data)}`);
-    const selected = await admin('/api/admin/select', { packId: result.data.packs[0].id });
+    const selected = await admin('/api/admin/select', { packId: result.data.packs[0].id, partyId: party.data.session.id });
     if (selected.status !== 200) throw new Error(`Cannot select fixture pack: ${JSON.stringify(selected.data)}`);
     return selected.data;
   }
@@ -83,13 +105,17 @@ export async function startFixtureRuntime(t, options = {}) {
     const cookie = result.response.headers.get('set-cookie')?.split(';')[0];
     return { id: result.data.viewer.playerId, token: result.data.token, cookie, state: result.data };
   }
-  async function upload(player, lineId, { bytes = webmBytes, type = 'audio/webm' } = {}) {
+  async function upload(player, lineId, { bytes = webmBytes, type = 'audio/webm', matchId = currentMatchId, retakeId = '' } = {}) {
     const form = new FormData();
     form.append('take', new Blob([bytes], { type }), 'microphone.webm');
-    return request(`/api/takes/${encodeURIComponent(lineId)}`, { method: 'POST', token: player.token, body: form });
+    return request(`/api/takes/${encodeURIComponent(lineId)}`, { method: 'POST', token: player.token, headers: {
+      ...(matchId ? { 'X-Match-ID': matchId } : {}), ...(retakeId ? { 'X-Retake-ID': retakeId } : {}),
+    }, body: form });
   }
-  async function accept(player, lineId, takeId) {
-    return request(`/api/takes/${encodeURIComponent(lineId)}/accept`, { method: 'POST', token: player.token, body: { takeId } });
+  async function accept(player, lineId, takeId, { retakeId = '' } = {}) {
+    return request(`/api/takes/${encodeURIComponent(lineId)}/accept`, { method: 'POST', token: player.token, body: {
+      takeId, matchId: currentMatchId, ...(retakeId ? { retakeId } : {}),
+    } });
   }
   return { ...fixture, runtime, runtimeOptions, base, adminToken, request, admin, select, join, upload, accept, stop };
 }
