@@ -179,6 +179,7 @@ test('a restored saved candidate advances without another upload', async t => {
 
 test('ORIGINAL uses preview padding and starts reference at the line; MY TAKE stays exact', async t => {
   const { recorder, frame } = fixture(t);
+  recorder.reference.duration = 2; // MP3 ends at dub_ends for this existing test.
   await recorder.playOriginal();
   assert.equal(recorder.video.currentTime, 8.5);
   assert.equal(recorder.reference.playCount, 0);
@@ -602,4 +603,59 @@ test('stopping the take retains microphone audio until the tail finishes', t => 
   assert.ok(recorder.captureTiming.tail >= 0.65);
   recorder.finishRecording(recorder.generation);
   assert.equal(stopped, true);
+});
+
+test('ORIGINAL does not cut off reference audio beyond dub_ends', async t => {
+  const { recorder, elements, frame } = fixture(t);
+  recorder.referenceDuration = 2.5;
+  const reference = elements.get('reference-audio');
+  reference.duration = 2.5;
+  await recorder.playOriginal();
+  // 2 s video cue reached, but the MP3 has another 500 ms.
+  recorder.video.currentTime = line.endTime;
+  frame();
+  assert.equal(recorder.mode, 'original');
+  assert.equal(reference.paused, false);
+  reference.currentTime = 2.5;
+  reference.ended = true;
+  frame();
+  assert.notEqual(recorder.mode, 'original');
+});
+
+test('recording waits for reference overhang and freezes tail at MediaRecorder.stop', async t => {
+  const oldMediaRecorder = Object.getOwnPropertyDescriptor(globalThis, 'MediaRecorder');
+  class FakeMediaRecorder extends EventTarget {
+    constructor() { super(); this.state = 'inactive'; this.mimeType = 'audio/webm'; }
+    static isTypeSupported() { return true; }
+    start() { this.state = 'recording'; }
+    stop() { this.state = 'inactive'; }
+  }
+  Object.defineProperty(globalThis, 'MediaRecorder', { value: FakeMediaRecorder, configurable: true });
+  t.after(() => { if (oldMediaRecorder) Object.defineProperty(globalThis, 'MediaRecorder', oldMediaRecorder); else delete globalThis.MediaRecorder; });
+  const { recorder, frame } = fixture(t);
+  recorder.enableMicrophone = async () => {};
+  recorder.waitCancelable = async () => {};
+  recorder.skipCountdown.checked = true;
+  recorder.captureDestination = { stream: {} };
+  recorder.referenceLoadPromise = recorder.referenceLoadPromise.then(() => { recorder.referenceDuration = 2.5; });
+  await recorder.record();
+  assert.equal(recorder.mode, 'recording');
+  assert.equal(recorder.captureTiming.tail, 1.15);
+  recorder.video.currentTime = 12;
+  frame();
+  assert.equal(recorder.stopRequested, false, 'must not stop at the INI end when reference speech continues');
+  recorder.video.currentTime = 12.5;
+  frame();
+  assert.equal(recorder.stopRequested, true);
+  assert.equal(recorder.captureTiming.tail, 1.15);
+  // Skip waiting for the timer. Async encoder finalization should not adjust metadata.
+  recorder.finishRecording(recorder.pendingStopGeneration);
+  const actualTail = recorder.captureTiming.tail;
+  recorder.prepareRecordedTake = async () => {};
+  const chunk = new Event('dataavailable'); chunk.data = new Blob(['encoded'], { type: 'audio/webm' });
+  recorder.recorder.dispatchEvent(chunk);
+  // An asynchronous stop event must not add encoder-finalization time.
+  await new Promise(resolve => setTimeout(resolve, 15));
+  recorder.recorder.dispatchEvent(new Event('stop'));
+  assert.equal(recorder.localTiming.tail, actualTail);
 });
