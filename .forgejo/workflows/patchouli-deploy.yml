@@ -15,4 +15,4 @@ jobs:
           test -n "$DEPLOY_TOKEN"
           curl --fail --show-error --silent \
             -X POST -H "Authorization: Bearer $DEPLOY_TOKEN" \
-            https://cd.zenisoft.net.ua/patchouli-deployment
+            https://cd.zenisoft.net.ua/patchouli
