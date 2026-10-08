@@ -1,18 +1,31 @@
-# Configure PATCHOULI_DEPLOYMENT_TOKEN in the Codeberg repository secrets.
-# Configure the matching "opendub" Patchouli deployment instance on your VPS.
-name: Open Dub / Patchouli Deployment
+name: Deploy via Patchouli
+
 on:
   push:
-    branches: [main, master]
+    branches:
+      - main
+  workflow_dispatch:
+
 jobs:
-  notify:
+  trigger-patchouli:
     runs-on: codeberg-tiny
+    container:
+      image: alpine:3.22
     steps:
-      - name: Request server-side flake input update
+      - name: Trigger deployment webhook
         env:
-          DEPLOY_TOKEN: ${{ secrets.PATCHOULI_DEPLOYMENT_TOKEN }}
+          PATCHOULI_WEBHOOK_URL: "https://cd.zenisoft.net.ua/patchouli"
+          PATCHOULI_TOKEN: ${{ secrets.PATCHOULI_TOKEN }}
         run: |
-          test -n "$DEPLOY_TOKEN"
-          curl --fail --show-error --silent \
-            -X POST -H "Authorization: Bearer $DEPLOY_TOKEN" \
-            https://cd.zenisoft.net.ua/patchouli
+          set -eu
+          test -n "$PATCHOULI_WEBHOOK_URL"
+          test -n "$PATCHOULI_TOKEN"
+          apk add --no-cache curl
+          curl --fail-with-body --silent --show-error \
+            --retry 3 \
+            --retry-delay 5 \
+            --retry-connrefused \
+            --max-time 30 \
+            -X POST \
+            -H "Authorization: Bearer $PATCHOULI_TOKEN" \
+            "$PATCHOULI_WEBHOOK_URL"
