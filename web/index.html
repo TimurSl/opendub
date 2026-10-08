@@ -76,6 +76,11 @@
         <div id="effect-row" class="effect-row" role="group" aria-label="Voice effects">
           <span class="effect-label">Voice effect</span>
         </div>
+        <div id="custom-effect-options" class="custom-effect-options" hidden>
+          <label for="custom-effect-args">Custom FFmpeg audio arguments</label>
+          <input id="custom-effect-args" type="text" value="-af vibrato=f=6:d=0.8" maxlength="256" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="custom-effect-help">
+          <p id="custom-effect-help" class="help">Applied on the server after recording (not live). Allowed: -af with volume, highpass, lowpass, atempo, vibrato, tremolo, acrusher, aecho. Example: -af highpass=f=250,acrusher=bits=6:mix=0.8. FFmpeg must be installed on the host.</p>
+        </div>
         <p id="effect-capability" class="help" role="status" aria-live="polite" hidden></p>
         <p id="recorder-status" class="recorder-status" role="status" aria-live="polite"></p>
         <p class="keyboard-help">Keyboard shortcuts: O original · R record or stop · T play your take · N accept and continue.</p>

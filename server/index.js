@@ -11,6 +11,7 @@ import { spawn } from "node:child_process";
 import { isIP } from "node:net";
 import { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack } from "./workshop/parser.js";
 import { SessionStore, fail, randomId } from "./session/store.js";
+import { parseCustomAudioArgs, runCustomAudio } from "./custom-audio.js";
 export { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack, SessionStore };
 
 const webDir = fileURLToPath(new URL("../web", import.meta.url));
@@ -192,6 +193,7 @@ export async function createRuntime(options = {}) {
   const exports = new Map();
   const transcodeVideo = options.transcodeVideo ?? process.env.TRANSCODE_VIDEO === "1";
   const ffmpegPath = options.ffmpegPath ?? process.env.FFMPEG_PATH ?? "ffmpeg";
+  let activeCustomAudioJobs = 0;
   if (transcodeVideo && store.pack) await transcode(store.pack, dataDir, ffmpegPath);
   const app = express();
   app.disable("x-powered-by");
@@ -387,6 +389,64 @@ export async function createRuntime(options = {}) {
       else { file.recordingMime = mime; done(null, true); }
     },
   }).single("take");
+  const uploadCustom = multer({
+    dest: path.join(dataDir, "tmp"),
+    limits: { fileSize: Math.min(maxUploadBytes, 25 * 1024 * 1024), files: 1, fields: 1, parts: 2, fieldSize: 256, fieldNameSize: 100 },
+    fileFilter(req, file, done) {
+      const mime = file.mimetype.toLowerCase().split(";")[0].trim();
+      if (!["audio/webm", "audio/ogg", "audio/mp4"].includes(mime)) { const error = new Error("Unsupported recording MIME type"); error.status = 415; done(error); }
+      else { file.recordingMime = mime; done(null, true); }
+    },
+  }).single("take");
+  // This route is only for applying a tightly allowlisted -af chain to a
+  // player's own recording. Raw FFmpeg argv/filtergraphs must never be exposed.
+  app.post("/api/takes/:lineId/custom", authenticated("player"), (req, res, next) => {
+    try {
+      req.customMatchId = req.get("x-match-id");
+      req.customRetakeId = req.get("x-retake-id") || "";
+      store.requireMatch(req.customMatchId);
+      store.requireOwner(req.viewer.playerId, req.params.lineId);
+      if (store.data.options.voiceEffectsEnabled === false) fail("Voice effects are disabled", 403);
+      if (activeCustomAudioJobs >= 2) fail("Custom audio processor is busy", 429);
+      const accepted = store.data.lineTakes[req.params.lineId];
+      const retake = store.data.activeRetakes[req.params.lineId];
+      if (accepted?.status === "accepted" && (!req.customRetakeId || retake?.id !== req.customRetakeId || retake.playerId !== req.viewer.playerId)) fail("Start a replacement retake first", 409);
+      if (req.customRetakeId && (retake?.id !== req.customRetakeId || retake.playerId !== req.viewer.playerId || retake.matchId !== req.customMatchId)) fail("Retake changed", 409);
+      req.customLineVersion = store.data.lineVersions[req.params.lineId] ?? 0;
+      uploadCustom(req, res, next);
+    } catch (error) { next(error); }
+  }, async (req, res) => {
+    let outputPath;
+    try {
+      if (!req.file) fail("Multipart field take is required");
+      const graph = parseCustomAudioArgs(req.body?.args);
+      const mime = req.file.recordingMime;
+      await signature(req.file.path, mime);
+      store.requireMatch(req.customMatchId);
+      const line = store.requireOwner(req.viewer.playerId, req.params.lineId);
+      if ((store.data.lineVersions[req.params.lineId] ?? 0) !== req.customLineVersion) fail("Line changed", 409);
+      if (activeCustomAudioJobs >= 2) fail("Custom audio processor is busy", 429);
+      activeCustomAudioJobs++;
+      try {
+        outputPath = path.join(dataDir, "tmp", `custom-${randomId(24)}.webm`);
+        await runCustomAudio(ffmpegPath, req.file.path, outputPath, graph, Math.min(118, line.duration));
+        const stats = await fs.stat(outputPath);
+        if (!stats.size || stats.size > maxUploadBytes) fail("Custom audio output exceeded size limit", 413);
+      } finally { activeCustomAudioJobs--; }
+      // State can change while FFmpeg is working; never return a stale result.
+      store.requireMatch(req.customMatchId);
+      store.requireOwner(req.viewer.playerId, req.params.lineId);
+      if ((store.data.lineVersions[req.params.lineId] ?? 0) !== req.customLineVersion) fail("Line changed", 409);
+      const retake = store.data.activeRetakes[req.params.lineId];
+      if (req.customRetakeId && (retake?.id !== req.customRetakeId || retake.playerId !== req.viewer.playerId)) fail("Retake changed", 409);
+      if (!req.customRetakeId && store.data.lineTakes[req.params.lineId]?.status === "accepted") fail("Take was accepted while processing", 409);
+      const bytes = await fs.readFile(outputPath);
+      res.type("audio/webm").send(bytes);
+    } finally {
+      if (req.file) await fs.rm(req.file.path, { force: true }).catch(() => {});
+      if (outputPath) await fs.rm(outputPath, { force: true }).catch(() => {});
+    }
+  });
   app.post("/api/takes/:lineId", authenticated("player"), (req, res, next) => {
     try {
       req.uploadMatchId = req.get("x-match-id");

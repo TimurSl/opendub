@@ -27,6 +27,25 @@ export class RuntimeClient extends EventTarget {
     if (result.type === 'state') this.receive(result);
     return result;
   }
+  async processCustomAudio(lineId, blob, args, retakeId = '') {
+    const form = new FormData();
+    form.append('args', args);
+    form.append('take', blob, 'voice.' + (blob.type.includes('ogg') ? 'ogg' : blob.type.includes('mp4') ? 'm4a' : 'webm'));
+    const response = await fetch('/api/takes/' + encodeURIComponent(lineId) + '/custom', {
+      method: 'POST', credentials: 'same-origin', cache: 'no-store',
+      headers: {
+        'X-Match-ID': this.state?.session?.matchId || '',
+        ...(retakeId ? { 'X-Retake-ID': retakeId } : {}),
+      },
+      body: form,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || `Custom effect failed (${response.status})`);
+    }
+    if (!response.headers.get('content-type')?.startsWith('audio/webm')) throw new Error('Unexpected Custom effect response');
+    return response.blob();
+  }
   receive(next) {
     const sameServer = next.serverId && next.serverId === this.state?.serverId;
     const sameParty = next.session?.id === this.state?.session?.id;

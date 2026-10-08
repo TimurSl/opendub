@@ -509,3 +509,59 @@ test('robot capture uses bipolar ring modulation, dry mix, saturation and compre
   assert.equal(oscillator.stopped, true); assert.equal(oscillator.disconnected, true);
   assert.equal(recorder.robotOscillator, null);
 });
+
+test('Custom displays its FFmpeg argument editor and does not require AudioWorklet', t => {
+  const { recorder, elements } = fixture(t);
+  recorder.effectWorkletAvailable = false;
+  recorder.setEffect('custom');
+  assert.equal(recorder.currentEffect, 'custom');
+  assert.equal(elements.get('custom-effect-options').hidden, false);
+  assert.equal(elements.get('custom-effect-args').disabled, false);
+  elements.get('custom-effect-args').value = '-af highpass=f=250';
+  elements.get('custom-effect-args').dispatchEvent(new Event('input'));
+  assert.equal(recorder.customArgs, '-af highpass=f=250');
+  recorder.mode = 'settling'; recorder.updateControls();
+  assert.equal(elements.get('custom-effect-args').disabled, true);
+  recorder.mode = 'idle'; recorder.setEffect('normal');
+  assert.equal(elements.get('custom-effect-options').hidden, true);
+});
+
+test('Custom processes before preview and upload, never uploads raw audio', async t => {
+  const { recorder, calls } = fixture(t, path => path.endsWith('/accept') ? {} : snapshot(candidate('processed')));
+  recorder.setEffect('custom');
+  recorder.customArgs = '-af volume=1.5';
+  const pending = deferred(); let requested = null;
+  recorder.client.processCustomAudio = (id, blob, args, retakeId) => {
+    requested = { id, blob, args, retakeId };
+    return pending.promise;
+  };
+  const raw = new Blob(['raw'], { type: 'audio/webm' });
+  const finished = new Blob(['processed'], { type: 'audio/webm' });
+  const operation = recorder.prepareRecordedTake(raw, line, recorder.generation);
+  assert.equal(recorder.mode, 'settling');
+  assert.equal(recorder.blob, null);
+  assert.equal(calls.length, 0);
+  assert.equal(requested.blob, raw);
+  assert.equal(requested.args, '-af volume=1.5');
+  pending.resolve(finished);
+  await operation;
+  await turn();
+  assert.equal(recorder.blob, finished);
+  assert.equal(recorder.review.src, recorder.objectUrl);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, '/api/takes/own-line');
+  assert.equal(await calls[0].body.get('take').text(), 'processed');
+});
+
+test('Custom failure restores the previous take without uploading raw audio', async t => {
+  const { recorder, calls, localTake } = fixture(t);
+  const original = localTake('previous');
+  recorder.backup = recorder.captureBackup();
+  recorder.blob = null; recorder.objectUrl = null;
+  recorder.setEffect('custom');
+  recorder.client.processCustomAudio = async () => { throw new Error('Forbidden FFmpeg filter'); };
+  await recorder.prepareRecordedTake(new Blob(['raw'], { type: 'audio/webm' }), line, recorder.generation);
+  assert.equal(recorder.blob, original);
+  assert.match(recorder.status.textContent, /Forbidden FFmpeg filter/);
+  assert.equal(calls.length, 0);
+});

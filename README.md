@@ -4,6 +4,37 @@ A small self-hosted browser runtime for locally installed Dub Together Workshop 
 
 Players record their own assigned lines **independently and in parallel**. There is no global recording turn or current line. Hosts choose Character mode, which assigns all lines for a character to one player, or Line mode, which gives each recording task its own owner and can give one character several voices. An unfinished line can be revisited, and an accepted take can be replaced with a player retake while other players continue. Characters can outnumber players, and there is no hardcoded eight-player limit.
 
+## Custom voice effect (requires FFmpeg)
+
+The **Custom** effect applies a supported FFmpeg audio filter chain to a recorded
+line **on the host after recording**, before the processed WebM is previewed or
+uploaded as the take. This is not a live microphone effect; the server must have
+`ffmpeg` installed (or configured with `FFMPEG_PATH`). On failure, the raw audio
+is not saved and a previous take is restored if one existed.
+
+Custom accepts only `-af` (or `-filter:a`) followed by at most six allowlisted
+audio filters, with numeric parameters. For example:
+
+```text
+-af highpass=f=250,acrusher=bits=6:mix=0.8
+-af vibrato=f=6:d=0.8,volume=1.3
+-af aecho=in_gain=0.8:out_gain=0.9:delays=200:decays=0.5
+-af tremolo=f=8:d=0.8,lowpass=f=3500
+```
+
+Allowed: `volume` (0–3), `highpass` (40–8000 Hz), `lowpass` (100–18000 Hz),
+`atempo` (0.75–1.5), `vibrato` (f=0.1–12, d=0–1), `tremolo` (f=0.1–15, d=0–1),
+`acrusher` (bits=2–16, mix=0–1), and `aecho` (in_gain=0–1,
+out_gain=0–1, delays=20–600 ms, decays=0–0.8).
+
+**Security:** Arbitrary FFmpeg CLI switches, scripts, expressions, file/URL
+filters, and complex filtergraph syntax are deliberately unsupported. Every
+value is checked against a fixed numeric schema, then the server constructs
+the graph and uses `spawn` without a shell. Processing is capped at two
+concurrent jobs, a 15-second timeout, and limited input/output size and
+duration. FFmpeg still parses untrusted audio; run the service under an
+unprivileged account or container for additional isolation.
+
 ## Run locally
 
 Install Node.js 22 or newer and npm. Then:

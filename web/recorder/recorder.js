@@ -11,7 +11,7 @@ const VOICE_EFFECTS = [
   ['normal', 'Normal'], ['echo', 'Echo'], ['phone', 'Phone'], ['robot', 'Robot'],
   ['autoTune', 'AUTO-TUNE'], ['goblin', 'Goblin'], ['demon', 'Demon'],
   ['chipmunk', 'Chipmunk'], ['giant', 'Giant'], ['walkieTalkie', 'Walkie-Talkie'],
-  ['megaphone', 'Megaphone'], ['cave', 'Cave'], ['badInternet', 'Bad Internet']
+  ['megaphone', 'Megaphone'], ['cave', 'Cave'], ['badInternet', 'Bad Internet'], ['custom', 'Custom']
 ];
 
 // These effects need sample-level DSP, not just a Web Audio filter.
@@ -31,7 +31,8 @@ const EFFECT_ICON_PATHS = {
   cave: '<path d="M3 20V9l4-5 5 3 5-4 4 6v11Z"/><path d="M9 20v-5a3 3 0 0 1 6 0v5M3 20h18"/>',
   megaphone: '<path d="m3 10 14-5v14L3 14v-4Z"/><path d="M7 15l2 5h4l-2-4m9-5h2m-2-4 2-2m-2 14 2 2"/>',
   badInternet: '<path d="M3 9a14 14 0 0 1 15-2M6 13a9 9 0 0 1 6-2m3 1 4 4m0-4-4 4M10 18h.01"/>',
-  autoTune: '<path d="M4 17V7m0 10h3m-3-5h2m-2-5h3m3 10v-6a2 2 0 0 1 4 0v6m-4-3h4m3 3V7m0 10h4"/>'
+  autoTune: '<path d="M4 17V7m0 10h3m-3-5h2m-2-5h3m3 10v-6a2 2 0 0 1 4 0v6m-4-3h4m3 3V7m0 10h4"/>',
+  custom: '<path d="M8 4 3 12l5 8m8-16 5 8-5 8M14 3l-4 18"/>'
 };
 
 const effectIcon = name => `<svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${EFFECT_ICON_PATHS[name]}</svg>`;
@@ -74,6 +75,10 @@ export class LineRecorder {
     });
     this.buttons = Object.fromEntries(['original', 'record', 'my-take', 'next'].map(id => [id, document.getElementById(id)]));
     this.effects = document.getElementById('effect-row'); this.currentEffect = 'normal';
+    this.customEffectOptions = document.getElementById('custom-effect-options');
+    this.customArgsInput = document.getElementById('custom-effect-args');
+    this.customArgs = this.customArgsInput?.value || '-af vibrato=f=6:d=0.8';
+    this.customArgsInput?.addEventListener('input', () => { this.customArgs = this.customArgsInput.value; });
     if (this.effects) {
       this.renderEffects();
       for (const button of this.effects.querySelectorAll('[data-effect]')) {
@@ -167,6 +172,8 @@ export class LineRecorder {
         button.setAttribute('aria-pressed', String(button.getAttribute('data-effect') === this.currentEffect));
       }
     }
+    if (this.customEffectOptions) this.customEffectOptions.hidden = this.currentEffect !== 'custom' || this.settings?.voiceEffectsEnabled === false;
+    if (this.customArgsInput) this.customArgsInput.disabled = capturing || accepting || this.settings?.voiceEffectsEnabled === false;
     this.drawWaveform();
     if (microphoneAvailable) this.scheduleMicrophoneMeter(); else this.stopMicrophoneMeter();
     this.onModeChange?.(this.mode);
@@ -238,6 +245,7 @@ export class LineRecorder {
       return;
     }
     this.currentEffect = this.settings?.voiceEffectsEnabled === false ? 'normal' : effect;
+    if (this.customEffectOptions) this.customEffectOptions.hidden = this.currentEffect !== 'custom';
     if (this.micSource && this.audioContext) this.buildMicGraph();
     this.updateControls();
   }
@@ -818,16 +826,8 @@ export class LineRecorder {
       if (this.progress) this.progress.hidden = true;
       const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || 'audio/webm' });
       if (!blob.size) { this.cancelRecording(); this.friendly('Recording failed — try again'); return; }
-      this.blob = blob; this.objectUrl = URL.createObjectURL(blob); this.savedTake = null; this.savedBlob = null;
-      this.review.src = this.objectUrl;
-      this.mode = 'settling'; this.status.textContent = 'Finishing take…'; this.updateControls();
-      this.localTakeSerial = (this.localTakeSerial || 0) + 1;
-      const localTakeId = `local-${this.localTakeSerial}`;
-      this.loadTakeWaveform(blob, localTakeId, this.objectUrl);
-      this.save().catch(() => {});
-      this.waitCancelable(200, generation).then(() => {
-        if (generation !== this.generation || this.mode !== 'settling') return;
-        this.releaseBackup(); this.mode = 'review'; this.status.textContent = 'Take ready'; this.updateControls();
+      this.prepareRecordedTake(blob, line, generation).catch(() => {
+        if (generation === this.generation) this.cancelRecording('Recording failed — try again');
       });
     }, { once: true });
     const start = () => {
@@ -867,6 +867,31 @@ export class LineRecorder {
     this.startListener = start;
     this.video.muted = true; this.video.addEventListener('playing', start, { once: true });
     try { await this.video.play(); } catch (error) { this.video.removeEventListener('playing', start); throw error; }
+  }
+  async prepareRecordedTake(blob, line, generation) {
+    if (generation !== this.generation) return;
+      this.mode = 'settling'; this.status.textContent = this.currentEffect === 'custom' ? 'Applying Custom FFmpeg effect…' : 'Finishing take…'; this.updateControls();
+      let finishedBlob = blob;
+      if (this.currentEffect === 'custom') {
+        try {
+          finishedBlob = await this.client.processCustomAudio(line.id, blob, this.customArgs, this.retakeId);
+          if (!(finishedBlob instanceof Blob) || !finishedBlob.size) throw new Error('Empty Custom FFmpeg result');
+        } catch (error) {
+          if (generation === this.generation) this.cancelRecording(`Custom effect failed: ${error.message || 'record again'}`);
+          return;
+        }
+      }
+      if (generation !== this.generation || this.mode !== 'settling') return;
+      this.blob = finishedBlob; this.objectUrl = URL.createObjectURL(finishedBlob); this.savedTake = null; this.savedBlob = null;
+      this.review.src = this.objectUrl;
+      this.localTakeSerial = (this.localTakeSerial || 0) + 1;
+      const localTakeId = `local-${this.localTakeSerial}`;
+      this.loadTakeWaveform(finishedBlob, localTakeId, this.objectUrl);
+      this.save().catch(() => {});
+      this.waitCancelable(200, generation).then(() => {
+        if (generation !== this.generation || this.mode !== 'settling') return;
+        this.releaseBackup(); this.mode = 'review'; this.status.textContent = 'Take ready'; this.updateControls();
+      });
   }
   drawWaveform(active = false) {
     if (!this.waveform) return;
