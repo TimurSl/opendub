@@ -177,19 +177,15 @@ test('a restored saved candidate advances without another upload', async t => {
   assert.deepEqual(calls[0].body, { takeId: 'restored' });
 });
 
-test('ORIGINAL uses preview padding and starts reference at the line; MY TAKE stays exact', async t => {
+test('ORIGINAL starts from the cue with audible reference immediately; MY TAKE remains aligned', async t => {
   const { recorder, frame } = fixture(t);
-  recorder.reference.duration = 2; // MP3 ends at dub_ends for this existing test.
+  recorder.reference.duration = 2;
   await recorder.playOriginal();
-  assert.equal(recorder.video.currentTime, 8.5);
-  assert.equal(recorder.reference.playCount, 0);
-  recorder.video.currentTime = 10; frame();
-  assert.equal(recorder.reference.playCount, 1);
+  assert.equal(recorder.video.currentTime, 10, 'no muted video preview before the reference');
+  assert.equal(recorder.reference.playCount, 1, 'reference starts with the video, not after 1.5 seconds');
   recorder.video.currentTime = 12; frame();
   assert.equal(recorder.reference.paused, true);
-  assert.equal(recorder.video.paused, false);
-  recorder.video.currentTime = 12.5; frame();
-  assert.equal(recorder.video.paused, true);
+  assert.equal(recorder.video.paused, true, 'ORIGINAL ends at dub_ends, without silent preview-after');
   recorder.setCandidate(candidate('saved'));
   await recorder.playTake();
   assert.equal(recorder.video.currentTime, 10);
@@ -224,6 +220,45 @@ test('decoded waveforms overlay the full longer take on the original line timeli
   recorder.mode = 'my-take'; recorder.review.currentTime = 1.25; recorder.lastWaveformDrawAt = -1000;
   recorder.drawWaveform();
   assert.ok(elements.get('recording-waveform').getContext('2d').strokes.some(stroke => stroke.color === '#f4f4f4'), 'playback draws a visible cursor');
+});
+
+test('reference waveform never displays sound beyond dub_ends even if MP3 is 4 seconds long', t => {
+  const { recorder, elements } = fixture(t);
+  recorder.referenceSamples = new Float32Array(400).fill(0.6);
+  recorder.referenceDuration = 4; recorder.referenceSampleRate = 100;
+  recorder.mode = 'idle'; recorder.drawWaveform();
+  const ctx = elements.get('recording-waveform').getContext('2d');
+  const original = ctx.strokes.filter(stroke => stroke.color === '#b093ff');
+  assert.ok(original.length > 0);
+  assert.ok(original.every(stroke => stroke.path[0][0] <= 680), 'no samples after the cue');
+  const idleEnd = Math.max(...original.map(stroke => stroke.path[0][0]));
+  assert.ok(idleEnd > 660, 'reference fills the cue duration, not the 4 s MP3');
+  recorder.mode = 'recording';
+  recorder.captureStartedAt = performance.now(); recorder.captureDuration = 2.65;
+  recorder.captureTiming = { leadIn: 0, tail: 0.65 };
+  recorder.livePeaks = createLivePeaks(2.65);
+  ctx.strokes.length = 0; recorder.drawWaveform();
+  const captureReference = ctx.strokes.filter(stroke => stroke.color === '#b093ff');
+  const finalX = Math.max(...captureReference.map(stroke => stroke.path[0][0]));
+  assert.ok(finalX < 520 && finalX > 490, 'only the 2-second cue is drawn; 650 ms post-roll is empty');
+});
+
+test('ORIGINAL waveform is not shifted or stretched by previously recorded lead-in/tail', t => {
+  const { recorder, elements } = fixture(t);
+  recorder.referenceSamples = new Float32Array(200).fill(0.4);
+  recorder.referenceDuration = 2; recorder.referenceSampleRate = 100;
+  recorder.takeSamples = new Float32Array(300).fill(0.3);
+  recorder.takeDuration = 3; recorder.takeSampleRate = 100;
+  recorder.localTiming = { leadIn: 0.3, tail: 0.7 };
+  recorder.mode = 'original'; recorder.lastWaveformDrawAt = -1000;
+  recorder.video.currentTime = 10;
+  recorder.drawWaveform();
+  const strokes = elements.get('recording-waveform').getContext('2d').strokes;
+  const original = strokes.filter(stroke => stroke.color === '#b093ff');
+  const cursor = strokes.find(stroke => stroke.color === '#f4f4f4');
+  assert.equal(original[0].path[0][0], 0, 'reference starts at zero, not the old take lead-in');
+  assert.equal(cursor.path[0][0], 0, 'playhead starts at the left edge');
+  assert.ok(original.at(-1).path[0][0] > 660, 'whole cue fits without the old take tail');
 });
 
 test('stale waveform decoding is discarded and missing-reference video decoding is attempted', async t => {
@@ -606,24 +641,21 @@ test('stopping the take retains microphone audio until the tail finishes', t => 
   assert.equal(stopped, true);
 });
 
-test('ORIGINAL does not cut off reference audio beyond dub_ends', async t => {
+test('ORIGINAL does not show/play a reference MP3 tail after the video cue', async t => {
   const { recorder, elements, frame } = fixture(t);
-  recorder.referenceDuration = 2.5;
+  recorder.referenceDuration = 4;
   const reference = elements.get('reference-audio');
-  reference.duration = 2.5;
+  reference.duration = 4;
   await recorder.playOriginal();
-  // 2 s video cue reached, but the MP3 has another 500 ms.
+  assert.equal(recorder.video.currentTime, line.startTime);
+  assert.equal(reference.playCount, 1);
   recorder.video.currentTime = line.endTime;
   frame();
-  assert.equal(recorder.mode, 'original');
-  assert.equal(reference.paused, false);
-  reference.currentTime = 2.5;
-  reference.ended = true;
-  frame();
   assert.notEqual(recorder.mode, 'original');
+  assert.equal(reference.paused, true);
 });
 
-test('recording waits for reference overhang and freezes tail at MediaRecorder.stop', async t => {
+test('recording ignores a longer reference MP3 and freezes tail at MediaRecorder.stop', async t => {
   const oldMediaRecorder = Object.getOwnPropertyDescriptor(globalThis, 'MediaRecorder');
   class FakeMediaRecorder extends EventTarget {
     constructor() { super(); this.state = 'inactive'; this.mimeType = 'audio/webm'; }
@@ -641,17 +673,17 @@ test('recording waits for reference overhang and freezes tail at MediaRecorder.s
   recorder.referenceLoadPromise = recorder.referenceLoadPromise.then(() => { recorder.referenceDuration = 2.5; });
   await recorder.record();
   assert.equal(recorder.mode, 'recording');
-  assert.equal(recorder.captureTiming.tail, 1.15);
+  assert.equal(recorder.captureTiming.tail, 0.65);
   recorder.video.currentTime = 12;
   frame();
-  assert.equal(recorder.stopRequested, false, 'must not stop at the INI end when reference speech continues');
+  assert.equal(recorder.stopRequested, false, 'wall-clock must control the capture regardless of video seeking');
   recorder.video.currentTime = 12.5;
   frame();
   assert.equal(recorder.stopRequested, false, 'video jumping ahead must not stop the microphone');
   recorder.captureCueEndAt = performance.now() - 1;
   frame();
   assert.equal(recorder.stopRequested, true);
-  assert.equal(recorder.captureTiming.tail, 1.15);
+  assert.equal(recorder.captureTiming.tail, 0.65);
   // Skip waiting for the timer. Async encoder finalization should not adjust metadata.
   recorder.captureDeadline = performance.now() - 1;
   recorder.finishRecording(recorder.pendingStopGeneration);
@@ -716,10 +748,9 @@ test('waveform cursor and progress have exactly the same deadline even if the vi
   recorder.skipCountdown.checked = true;
   recorder.captureDestination = { stream: {} };
   recorder.referenceLoadPromise = Promise.resolve();
-  recorder.cueOverhang = () => 0.5;
   await recorder.record();
   const expected = recorder.captureDuration;
-  assert.ok(expected >= 2.5 + 0.65, 'planned interval includes overhang and post-roll');
+  assert.ok(expected >= 2 + 0.65 && expected < 3.3, 'only INI cue, pre-roll and effect tail are included');
   assert.equal(recorder.progress.max, expected);
   recorder.video.currentTime = 12.5;
   frame();

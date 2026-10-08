@@ -1,5 +1,5 @@
 import { createLivePeaks, appendLivePeaks } from './live-waveform.js';
-import { referenceOverhang, captureTail, capturePlan, recordedTail } from './cue-timing.js';
+import { captureTail, capturePlan, recordedTail } from './cue-timing.js';
 
 const CAPTURE_PRIME_MS = 180; // Start the encoder before the video cue (avoid losing the first phoneme).
 const CAPTURE_TAIL_MS = 650; // Keep the mic live after the video cue ends.
@@ -53,7 +53,7 @@ export class LineRecorder {
     this.saveJob = null; this.saveTail = Promise.resolve(); this.destroyed = false; this.waits = new Set();
     this.mediaWaits = new Set();
     this.waveformCache = new Map(); this.decodedTakes = new Map(); this.referenceSamples = null; this.takeSamples = null;
-    this.referenceDuration = 0; this.takeDuration = 0; this.localTiming = null; this.captureTiming = null; this.activeCueOverhang = 0; this.livePeaks = null; this.waveformGeneration = 0; this.referenceGeneration = 0; this.takeGeneration = 0;
+    this.referenceDuration = 0; this.takeDuration = 0; this.localTiming = null; this.captureTiming = null; this.livePeaks = null; this.waveformGeneration = 0; this.referenceGeneration = 0; this.takeGeneration = 0;
     this.video = document.getElementById('line-video');
     this.reference = document.getElementById('reference-audio');
     this.review = document.getElementById('take-review');
@@ -483,9 +483,6 @@ export class LineRecorder {
       this.waits.add(wait);
     });
   }
-  cueOverhang() {
-    return referenceOverhang(this.line?.duration || 0, this.referenceDuration, this.effectTailMilliseconds() / 1000);
-  }
   waveformCacheKey(line = this.line) { return `${this.matchId || ''}:${line?.id || ''}`; }
   copyAudioSamples(buffer, startTime = 0, endTime = buffer.duration) {
     const channel = buffer.getChannelData(0); const start = Math.max(0, Math.floor(startTime * buffer.sampleRate));
@@ -673,7 +670,7 @@ export class LineRecorder {
     this.activeAnalyser = this.captureAnalyser || null;
     this.drawWaveform(false); this.updateControls();
   }
-  async playFragment(audio, mode, fallback = false, padded = false) {
+  async playFragment(audio, mode, fallback = false) {
     if (!this.line || activeCapture(this.mode) || this.mode === 'accepting') return;
     this.stopMedia(); const generation = this.generation; const mediaGeneration = this.mediaGeneration;
     const line = this.line;
@@ -686,22 +683,21 @@ export class LineRecorder {
     const leadIn = mode === 'my-take' ? (takeTiming?.leadIn || 0) : 0;
     const tail = mode === 'my-take' ? (takeTiming?.tail || 0) : 0;
     const takeTimelineStart = line.startTime - leadIn;
-    const fragmentStart = mode === 'my-take' ? Math.max(0, takeTimelineStart)
-      : padded ? Math.max(0, line.startTime - (this.settings?.previewBefore ?? 1.5)) : line.startTime;
-    const fragmentEnd = mode === 'my-take' ? line.endTime + tail : padded ? line.endTime + (this.settings?.previewAfter ?? 0.5) : line.endTime;
+    // ORIGINAL starts with the voice, not 1.5 s of muted video preview.
+    const fragmentStart = mode === 'my-take' ? Math.max(0, takeTimelineStart) : line.startTime;
+    const fragmentEnd = mode === 'my-take' ? line.endTime + tail : line.endTime;
     let audioTail = 0; let audioPlaybackEnd = 0;
     await this.seek(fragmentStart);
     if (generation !== this.generation || mediaGeneration !== this.mediaGeneration) return;
     if (audio) {
       audio.load();
       if (audio.readyState < 2) await this.waitMedia(audio, 'loadeddata');
-      // A cue at video time zero cannot play negative-time lead-in. Skip just
-      // that portion of the take, keeping the actual speech on the cue.
+      // A cue at video time zero cannot play negative-time lead-in.
       audio.currentTime = mode === 'my-take' ? Math.max(0, -takeTimelineStart) : 0;
       if (Number.isFinite(audio.duration)) {
-        audioPlaybackEnd = mode === 'my-take' ? audio.duration
-          : Math.min(audio.duration, line.duration + referenceOverhang(line.duration, audio.duration, 0));
-        audioTail = Math.max(0, audioPlaybackEnd - (line.endTime - (mode === 'my-take' ? takeTimelineStart : line.startTime)));
+        // Never play MP3 samples from beyond dub_ends in ORIGINAL.
+        audioPlaybackEnd = mode === 'my-take' ? audio.duration : Math.min(audio.duration, line.duration);
+        audioTail = mode === 'my-take' ? Math.max(0, audioPlaybackEnd - (line.endTime - takeTimelineStart)) : 0;
       }
     }
     if (generation !== this.generation || mediaGeneration !== this.mediaGeneration) return;
@@ -709,7 +705,7 @@ export class LineRecorder {
     this.status.textContent = mode === 'original' ? 'Original' : 'My take';
     let voiceStarted = false;
     const startAudio = () => {
-      if (!audio || voiceStarted || this.video.currentTime < (mode === 'my-take' ? fragmentStart : line.startTime) - 0.005 || generation !== this.generation || mediaGeneration !== this.mediaGeneration) return;
+      if (!audio || voiceStarted || this.video.currentTime < fragmentStart - 0.005 || generation !== this.generation || mediaGeneration !== this.mediaGeneration) return;
       voiceStarted = true;
       audio.play().catch(() => { this.stopMedia(); this.friendly('Video unavailable — ask host'); });
     };
@@ -718,8 +714,7 @@ export class LineRecorder {
     try { await this.video.play(); } catch (error) { this.stopMedia(); throw error; }
     const step = () => {
       if (generation !== this.generation || mediaGeneration !== this.mediaGeneration) return;
-      // Voice playback supplies the fragment timeline when an audio take exists.
-      if (audio && !voiceStarted && this.video.currentTime >= (mode === 'my-take' ? fragmentStart : line.startTime)) startAudio();
+      if (audio && !voiceStarted && this.video.currentTime >= fragmentStart) startAudio();
       if (audio && voiceStarted && !audio.paused && !audio.ended && this.video.currentTime < line.endTime) {
         const desired = (mode === 'my-take' ? takeTimelineStart : line.startTime) + audio.currentTime;
         if (Math.abs(this.video.currentTime - desired) > 0.15) this.video.currentTime = Math.min(desired, line.endTime);
@@ -729,8 +724,6 @@ export class LineRecorder {
         if (audioTail > 0) this.video.pause();
         if (audioTail <= 0 || audioFinished) audio.pause();
       }
-      // Never stop an overhanging reference MP3 just because the video cue
-      // reached dub_ends. The tail is audible with the final video frame held.
       if (audioTail > 0 ? audioFinished : this.video.currentTime >= fragmentEnd || this.video.ended) {
         this.stopMedia(); this.status.textContent = this.hasPlaybackTake() ? 'Take ready' : ''; this.updateControls(); return;
       }
@@ -745,8 +738,8 @@ export class LineRecorder {
     if (this.mode === 'original') { this.stopMedia(); this.status.textContent = this.hasPlaybackTake() ? 'Take ready' : ''; return; }
     if (this.line.referenceAudio) {
       this.reference.src = this.line.referenceAudio;
-      await this.playFragment(this.reference, 'original', false, true);
-    } else await this.playFragment(null, 'original', true, true);
+      await this.playFragment(this.reference, 'original');
+    } else await this.playFragment(null, 'original', true);
   }
   async playTake() {
     if (!this.hasPlaybackTake()) return;
@@ -879,12 +872,7 @@ export class LineRecorder {
     this.mode = 'preroll'; this.status.textContent = 'Starting…'; this.updateControls();
     await this.waitCancelable(200, generation);
     if (generation !== this.generation) return;
-    // Waveform and actual capture must use the same cue length. The original
-    // audio can extend a little beyond the INI's dub_ends timestamp.
-    if (this.referenceLoadPromise) await Promise.race([this.referenceLoadPromise, this.waitCancelable(1500, generation)]);
-    if (generation !== this.generation) return;
-    const overhang = this.cueOverhang();
-    this.activeCueOverhang = overhang; // Frozen for this take, even if the reference finishes loading later.
+    // Reference MP3 duration is unrelated to the INI video cue boundary.
     const mimeType = chooseRecordingMime(); const chunks = [];
     const recorder = new MediaRecorder(this.captureDestination?.stream || this.stream, mimeType ? { mimeType } : undefined);
     this.recorder = recorder;
@@ -898,7 +886,7 @@ export class LineRecorder {
       // Tail was frozen at recorder.stop(), not at this asynchronous event.
       // Finalizing the encoded WebM may take hundreds of milliseconds.
       this.localTiming = this.captureTiming ? { ...this.captureTiming } : null;
-      this.captureTiming = null; this.activeCueOverhang = 0; this.livePeaks = null; this.captureStartedAt = 0; this.stopRequestedAt = 0; this.captureDeadline = 0; this.captureDuration = 0; this.captureCueEndAt = 0;
+      this.captureTiming = null; this.livePeaks = null; this.captureStartedAt = 0; this.stopRequestedAt = 0; this.captureDeadline = 0; this.captureDuration = 0; this.captureCueEndAt = 0;
       this.stopMedia(); clearTimeout(this.recordingWatchdog);
       if (this.progress) this.progress.hidden = true;
       const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || 'audio/webm' });
@@ -912,7 +900,7 @@ export class LineRecorder {
     const captureStart = performance.now();
     this.captureStartedAt = captureStart;
     this.captureDeadline = 0; this.captureCueEndAt = 0; this.captureDuration = 0;
-    this.captureTiming = { leadIn: 0, tail: captureTail(overhang, this.effectTailMilliseconds() / 1000) };
+    this.captureTiming = { leadIn: 0, tail: captureTail(this.effectTailMilliseconds() / 1000) };
     this.livePeaks = createLivePeaks(line.duration + 3);
     this.dismissedTakeId = this.backup?.savedTake?.id ?? this.observedCandidateId;
     this.blob = null; this.objectUrl = null; this.savedTake = null; this.savedBlob = null; this.localTiming = null;
@@ -941,8 +929,8 @@ export class LineRecorder {
       if (leadIn > 1) { this.cancelRecording('Video took too long to start — record again'); return; }
       this.captureTiming.leadIn = Math.round(Math.max(0, leadIn) * 1000) / 1000;
       const cueStartAt = performance.now();
-      const plan = capturePlan(captureStart, cueStartAt, line.duration, overhang, this.effectTailMilliseconds() / 1000);
-      this.captureCueEndAt = cueStartAt + (line.duration + overhang) * 1000;
+      const plan = capturePlan(captureStart, cueStartAt, line.duration, this.effectTailMilliseconds() / 1000);
+      this.captureCueEndAt = cueStartAt + line.duration * 1000;
       this.captureDeadline = plan.deadlineMs;
       this.captureDuration = plan.duration;
       this.captureTiming.tail = plan.tail;
@@ -985,7 +973,8 @@ export class LineRecorder {
     const data = this.liveSamples?.length === analyser.fftSize ? this.liveSamples : new Float32Array(analyser.fftSize);
     this.liveSamples = data;
     analyser.getFloatTimeDomainData?.(data);
-    appendLivePeaks(this.livePeaks, (performance.now() - this.captureStartedAt) / 1000, data);
+    appendLivePeaks(this.livePeaks, Math.min(this.captureDuration || Infinity,
+      (performance.now() - this.captureStartedAt) / 1000), data);
   }
 
   async prepareRecordedTake(blob, line, generation, imported = false) {
@@ -1033,13 +1022,15 @@ export class LineRecorder {
     const isCapturing = this.livePeaks && ['preroll', 'recording'].includes(this.mode);
     const take = this.savedTake || this.acceptedTake;
     const timing = isCapturing ? this.captureTiming : (this.localTiming || take);
-    const leadIn = timing?.leadIn || 0; const tail = timing?.tail || 0;
-    const visibleOverhang = isCapturing ? (this.activeCueOverhang || 0) : referenceOverhang(this.line?.duration || 0, this.referenceDuration, 0);
-    const visibleReferenceDuration = Math.min(this.referenceDuration, (this.line?.duration || 0) + visibleOverhang);
-    // One duration for the live waveform, playhead and progress bar.
-    // In particular, never add a reference tail beyond the actual capture.
-    const duration = isCapturing && this.captureDuration > 0 ? this.captureDuration
-      : Math.max((this.line?.duration || 0) + leadIn + tail, visibleReferenceDuration + leadIn, this.takeDuration, 0.05);
+    // A prior take's encoder lead-in belongs to MY TAKE, not ORIGINAL.
+    const leadIn = this.mode === 'original' ? 0 : (timing?.leadIn || 0);
+    const tail = this.mode === 'original' ? 0 : (timing?.tail || 0);
+    const visibleReferenceDuration = Math.min(this.referenceDuration, this.line?.duration || 0);
+    // ORIGINAL previews exactly the cue. Capturing shows only the real capture
+    // interval, including the short post-roll actually recorded by MediaRecorder.
+    const duration = this.mode === 'original' ? Math.max(this.line?.duration || 0, 0.05)
+      : isCapturing && this.captureDuration > 0 ? this.captureDuration
+      : Math.max((this.line?.duration || 0) + leadIn + tail, this.takeDuration, 0.05);
     const drawSamples = (samples, sampleRate, sampleDuration, color, alpha, offset = 0) => {
       if (!samples?.length || !sampleRate || !sampleDuration) return;
       context.globalAlpha = alpha; context.strokeStyle = color; context.lineWidth = 1;
@@ -1049,8 +1040,9 @@ export class LineRecorder {
         const time = column / columns * duration - offset;
         if (time < 0) continue;
         if (time >= sampleDuration) break;
-        const start = Math.min(samples.length - 1, Math.floor(time * sampleRate));
-        const end = Math.min(samples.length, Math.max(start + 1, start + samplesPerColumn));
+        const sampleLimit = Math.min(samples.length, Math.ceil(sampleDuration * sampleRate));
+        const start = Math.min(sampleLimit - 1, Math.floor(time * sampleRate));
+        const end = Math.min(sampleLimit, Math.max(start + 1, start + samplesPerColumn));
         let minimum = 0; let maximum = 0;
         for (let index = start; index < end; index++) { minimum = Math.min(minimum, samples[index]); maximum = Math.max(maximum, samples[index]); }
         const x = column / columns * width;
@@ -1072,7 +1064,8 @@ export class LineRecorder {
         context.lineTo(x, center - peaks.minima[bin] * scale); context.stroke();
       }
       context.globalAlpha = 1;
-    } else drawSamples(this.takeSamples, this.takeSampleRate, this.takeDuration, '#67e5ff', 0.98);
+    } else drawSamples(this.takeSamples, this.takeSampleRate, this.takeDuration, '#67e5ff', 0.98,
+      this.mode === 'original' ? -(timing?.leadIn || 0) : 0);
     if (['original', 'my-take', 'recording', 'preroll'].includes(this.mode)) {
       const elapsed = isCapturing ? Math.max(0, (performance.now() - this.captureStartedAt) / 1000)
         : this.mode === 'my-take' ? this.review.currentTime : this.video.currentTime - this.line.startTime + leadIn;
@@ -1122,7 +1115,7 @@ export class LineRecorder {
     this.generation++; this.cancelPendingWaits(); this.stopMedia(); clearTimeout(this.recordingWatchdog); clearTimeout(this.stopFallbackTimer);
     this.takeGeneration++;
     this.stopRequested = false; this.pendingStopGeneration = null;
-    this.captureTiming = null; this.activeCueOverhang = 0; this.livePeaks = null; this.captureStartedAt = 0; this.stopRequestedAt = 0; this.captureDeadline = 0; this.captureDuration = 0; this.captureCueEndAt = 0;
+    this.captureTiming = null; this.livePeaks = null; this.captureStartedAt = 0; this.stopRequestedAt = 0; this.captureDeadline = 0; this.captureDuration = 0; this.captureCueEndAt = 0;
     this.countdown.hidden = true; this.waveform.hidden = false;
     if (this.progress) this.progress.hidden = true;
     if (this.recorder?.state === 'recording') { try { this.recorder.stop(); } catch {} }
