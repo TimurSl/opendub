@@ -30,6 +30,14 @@ in {
       type = types.str; default = "${state}/packs";
       description = "Directory containing imported/validated Open Dub packs; must be writable by opendub.";
     };
+    workshopMaxFiles = mkOption {
+      type = types.ints.between 1 9007199254740991; default = 10000;
+      description = "Maximum number of files per imported Workshop pack, including INI and reference audio files.";
+    };
+    workshopMaxBytes = mkOption {
+      type = types.ints.between 1 9007199254740991; default = 10737418240;
+      description = "Maximum total size in bytes per imported Workshop pack (default 10 GiB).";
+    };
     steamcmdDir = mkOption {
       type = types.str; default = "${state}/steamcmd";
       description = "Persistent SteamCMD working/download directory, shared with opendub-steam login.";
@@ -66,6 +74,8 @@ in {
         WORKSHOP_DIR = cfg.workshopDir;
         STEAMCMD_DIR = cfg.steamcmdDir;
         WORKSHOP_APP_ID = toString cfg.workshopAppId;
+        WORKSHOP_MAX_FILES = toString cfg.workshopMaxFiles;
+        WORKSHOP_MAX_BYTES = toString cfg.workshopMaxBytes;
         FFMPEG_PATH = "${pkgs.ffmpeg}/bin/ffmpeg";
         TRANSCODE_VIDEO = "1";
         STEAMCMD_USERNAME = cfg.steamcmdUsername;

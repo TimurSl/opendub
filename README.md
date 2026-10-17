@@ -121,6 +121,8 @@ The runtime accepts environment variables; see startup output for the effective 
 
 `PREVIEW_BEFORE` and `PREVIEW_AFTER` set preview padding in seconds; defaults are 1.5 and 0.5. Padding affects preview only: microphone takes start at the line timestamp so padding cannot shift the final mix. `MAX_UPLOAD_MB` sets the per-take size limit (default 25 MiB). `TLS_CERT` and `TLS_KEY` must be provided together. `TRANSCODE_VIDEO=1` enables whole-video MP4 caching; `FFMPEG_PATH` selects the executable.
 
+`WORKSHOP_MAX_FILES` and `WORKSHOP_MAX_BYTES` limit each Workshop pack during import (defaults: 10000 files and 10737418240 bytes / 10 GiB). Both must be positive safe integers. Each line usually adds an INI and an MP3, so large packs can contain thousands of files. For NixOS use `services.opendub.workshopMaxFiles` and `services.opendub.workshopMaxBytes`. Limit errors identify the exceeded limit and its setting; adjust it and retry the download. Allow disk space for both the SteamCMD cache and the imported copy, plus any video conversion cache.
+
 Uploaded recordings have a size limit and their media type is validated. The server serves only allowlisted files in the selected pack and authenticated recordings. It does not provide arbitrary filesystem access.
 
 ## Development

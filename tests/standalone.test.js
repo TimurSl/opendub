@@ -1,13 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, mkdir, rm, writeFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, mkdir, rm, writeFile, readdir, stat, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 import { initializeAdminToken, readAdminToken, rotateAdminToken, parseWireGuardCidrs, wireGuardAddressAllowed, secureEquals } from '../server/admin-auth.js';
-import { downloadWorkshopItem, workshopItemId, workshopAppId, steamUsername, runSteamcmd } from '../server/workshop/downloader.js';
+import { downloadWorkshopItem, workshopItemId, workshopAppId, workshopLimits, steamUsername, runSteamcmd } from '../server/workshop/downloader.js';
+import { createRuntime } from '../server/index.js';
+import { startFixtureRuntime } from './helpers.js';
 const root = async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'opendub-standalone-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -79,6 +82,87 @@ test('Malformed Workshop packs and refused publish leave old packs intact', asyn
   await rm(source, { recursive: true }); await writePack(source);
   await assert.rejects(downloadWorkshopItem({ ...opts, beforePublish: () => { throw new Error('Selected pack'); } }), /Selected pack/);
   assert.equal((await readdir(workshopDir)).length, 1);
+});
+
+test('Workshop packs with more than 500 files import with default limits', async t => {
+  const dir = await root(t), steamcmdDir = path.join(dir, 'steam'), workshopDir = path.join(dir, 'packs');
+  const source = path.join(steamcmdDir, 'steamapps/workshop/content/5020310/3819916508');
+  await writePack(source);
+  const line = await readFile(path.join(source, 'line.ini'));
+  for (let i = 0; i < 250; i++) {
+    await writeFile(path.join(source, `line-${i}.ini`), line);
+    await writeFile(path.join(source, `line-${i}.mp3`), 'ID3 reference');
+  }
+  const downloaded = await downloadWorkshopItem({ itemId: '3819916508', steamcmdDir, workshopDir, run: async () => {} });
+  assert.equal(downloaded.pack.lines.length, 251);
+  assert.equal((await readdir(downloaded.pack.directory)).length, 505);
+});
+
+test('Workshop limits accept exact boundaries and reject excess before replacing a pack', async t => {
+  const dir = await root(t), steamcmdDir = path.join(dir, 'steam'), workshopDir = path.join(dir, 'packs');
+  const source = path.join(steamcmdDir, 'steamapps/workshop/content/5020310/1234567890');
+  await writePack(source);
+  const sizes = await Promise.all((await readdir(source)).map(async name => (await stat(path.join(source, name))).size));
+  const maxBytes = sizes.reduce((sum, size) => sum + size, 0);
+  const opts = { itemId: '1234567890', steamcmdDir, workshopDir, maxFiles: 5, maxBytes, run: async () => {} };
+  const imported = await downloadWorkshopItem(opts);
+  const marker = path.join(imported.pack.directory, 'keep.txt');
+  await writeFile(marker, 'previous pack');
+  await assert.rejects(downloadWorkshopItem({ ...opts, maxFiles: 4 }), /file limit: found at least 5 files, limit 4.*WORKSHOP_MAX_FILES/);
+  await assert.rejects(downloadWorkshopItem({ ...opts, maxBytes: maxBytes - 1 }), /size limit:.*bytes.*WORKSHOP_MAX_BYTES/);
+  await mkdir(path.join(source, 'nested'));
+  await writeFile(path.join(source, 'nested', 'extra'), 'extra');
+  await assert.rejects(downloadWorkshopItem({ ...opts, maxBytes: maxBytes + 100 }), /file limit: found at least 6 files, limit 5/);
+  assert.equal(await readFile(marker, 'utf8'), 'previous pack');
+  assert.deepEqual(await readdir(workshopDir), ['workshop-1234567890']);
+});
+
+test('Workshop tree validation still rejects links with higher limits', async t => {
+  const dir = await root(t), steamcmdDir = path.join(dir, 'steam'), workshopDir = path.join(dir, 'packs');
+  const source = path.join(steamcmdDir, 'steamapps/workshop/content/5020310/1234567890');
+  await writePack(source);
+  await symlink(dir, path.join(source, 'linked-directory'));
+  await assert.rejects(downloadWorkshopItem({ itemId: '1234567890', steamcmdDir, workshopDir, run: async () => {} }), /unsupported links/);
+  assert.deepEqual(await readdir(workshopDir), []);
+});
+
+test('Workshop limits are finite positive integers, validated before download or runtime startup', async () => {
+  assert.deepEqual(workshopLimits(), { maxFiles: 10000, maxBytes: 10 * 1024 ** 3 });
+  assert.deepEqual(workshopLimits({ maxFiles: '20000', maxBytes: '21474836480' }), { maxFiles: 20000, maxBytes: 20 * 1024 ** 3 });
+  for (const value of [0, -1, 1.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1, '', 'bad', true, null]) {
+    assert.throws(() => workshopLimits({ maxFiles: value }), /WORKSHOP_MAX_FILES/);
+    assert.throws(() => workshopLimits({ maxBytes: value }), /WORKSHOP_MAX_BYTES/);
+  }
+  let ran = false;
+  await assert.rejects(downloadWorkshopItem({ itemId: '1234567890', maxFiles: 0, run: async () => { ran = true; } }), /WORKSHOP_MAX_FILES/);
+  assert.equal(ran, false);
+  await assert.rejects(createRuntime({ workshopMaxBytes: 0 }), /WORKSHOP_MAX_BYTES/);
+});
+
+test('Workshop HTTP downloads enforce configured limits from environment and runtime options', async t => {
+  const dir = await root(t), steamcmdDir = path.join(dir, 'steam');
+  await writePack(path.join(steamcmdDir, 'steamapps/workshop/content/5020310/1234567890'));
+  const fake = path.join(dir, 'steamcmd');
+  await writeFile(fake, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  const previous = process.env.WORKSHOP_MAX_FILES;
+  process.env.WORKSHOP_MAX_FILES = '4';
+  t.after(() => { if (previous === undefined) delete process.env.WORKSHOP_MAX_FILES; else process.env.WORKSHOP_MAX_FILES = previous; });
+  for (const [overrides, message] of [
+    [{}, /file limit:.*WORKSHOP_MAX_FILES/],
+    [{ workshopMaxFiles: 5, workshopMaxBytes: 1 }, /size limit:.*WORKSHOP_MAX_BYTES/],
+  ]) {
+    const host = await startFixtureRuntime(t, { steamcmdDir, steamcmdPath: fake, ...overrides });
+    assert.equal((await host.admin('/api/admin/workshop/download', { item: '1234567890' })).status, 202);
+    let job;
+    for (let i = 0; i < 100; i++) {
+      job = (await host.admin('/api/admin/workshop/status')).data.job;
+      if (job.status !== 'running') break;
+      await delay(20);
+    }
+    assert.equal(job.status, 'error');
+    assert.match(job.error, message);
+    await host.stop();
+  }
 });
 
 

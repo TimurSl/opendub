@@ -13,7 +13,7 @@ import { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack } from "./
 import { SessionStore, fail, randomId } from "./session/store.js";
 import { parseCustomAudioArgs, runCustomAudio } from "./custom-audio.js";
 import { soundpadFormat, checkSoundpadFile, runSoundpadAudio } from "./soundpad-audio.js";
-import { downloadWorkshopItem, workshopItemId, workshopAppId, steamUsername, DUB_TOGETHER_APP_ID } from "./workshop/downloader.js";
+import { downloadWorkshopItem, workshopItemId, workshopAppId, workshopLimits, steamUsername, DUB_TOGETHER_APP_ID } from "./workshop/downloader.js";
 import { secureEquals, initializeAdminToken, readAdminToken, tokenFile, parseWireGuardCidrs, wireGuardAddressAllowed } from "./admin-auth.js";
 export { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack, SessionStore };
 
@@ -176,6 +176,10 @@ export async function createRuntime(options = {}) {
   const dataDir = path.resolve(options.dataDir ?? process.env.DATA_DIR ?? "./data");
   const host = options.host ?? process.env.HOST ?? "0.0.0.0";
   const port = Number(options.port ?? process.env.PORT ?? 7373);
+  const downloadLimits = workshopLimits({
+    maxFiles: options.workshopMaxFiles ?? process.env.WORKSHOP_MAX_FILES,
+    maxBytes: options.workshopMaxBytes ?? process.env.WORKSHOP_MAX_BYTES,
+  });
   const publicLink = publicOrigin(options.publicLink ?? process.env.PUBLIC_LINK);
   const trustedProxy = trustedProxyAddresses(options.trustedProxy ?? process.env.TRUSTED_PROXY);
   const tokenOverride = options.adminToken ?? process.env.ADMIN_TOKEN;
@@ -278,6 +282,7 @@ export async function createRuntime(options = {}) {
     void (async () => {
       try {
         const result = await downloadWorkshopItem({ itemId: id, steamcmdPath, steamcmdDir, workshopDir, username: steamcmdUsername, appId: steamcmdAppId,
+          ...downloadLimits,
           beforePublish: target => { if (store.pack?.directory === target) fail('Cannot update the pack while it is selected in an active match', 409); } });
         const refreshed = await discoverPacks(workshopDir);
         discovered.packs = refreshed.packs;

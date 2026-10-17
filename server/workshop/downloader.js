@@ -6,6 +6,21 @@ import { parseWorkshopPack } from './parser.js';
 
 export const DUB_TOGETHER_APP_ID = '5020310';
 
+// Each recording line usually has both an INI and an MP3. Full-length packs
+// can have thousands of files and several GiB of video.
+export function workshopLimits({ maxFiles = 10000, maxBytes = 10 * 1024 ** 3 } = {}) {
+  const limits = {};
+  for (const [key, value, setting] of [
+    ['maxFiles', maxFiles, 'WORKSHOP_MAX_FILES'], ['maxBytes', maxBytes, 'WORKSHOP_MAX_BYTES'],
+  ]) {
+    const limit = Number(value);
+    if (!['string', 'number'].includes(typeof value) || !Number.isSafeInteger(limit) || limit <= 0)
+      throw new Error(`${setting} must be a positive safe integer`);
+    limits[key] = limit;
+  }
+  return limits;
+}
+
 export function workshopAppId(value = DUB_TOGETHER_APP_ID) {
   const id = String(value);
   if (!/^[1-9][0-9]{0,9}$/.test(id) || Number(id) > 0xFFFFFFFF)
@@ -70,7 +85,7 @@ export function runSteamcmd(executable, args, { timeoutMs = 300000, spawnProcess
   });
 }
 
-async function checkTree(root) {
+async function checkTree(root, { maxFiles, maxBytes }) {
   let bytes = 0, files = 0;
   async function visit(directory) {
     for (const item of await fs.readdir(directory, { withFileTypes: true })) {
@@ -80,7 +95,10 @@ async function checkTree(root) {
       else {
         files++;
         bytes += (await fs.stat(name)).size;
-        if (files > 500 || bytes > 1500 * 1024 * 1024) throw new Error('Workshop pack exceeds safe file or size limits');
+        if (files > maxFiles)
+          throw new Error(`Workshop pack exceeds file limit: found at least ${files} files, limit ${maxFiles}. Increase WORKSHOP_MAX_FILES (NixOS: services.opendub.workshopMaxFiles).`);
+        if (bytes > maxBytes)
+          throw new Error(`Workshop pack exceeds size limit: found at least ${bytes} bytes, limit ${maxBytes} bytes. Increase WORKSHOP_MAX_BYTES (NixOS: services.opendub.workshopMaxBytes).`);
       }
     }
   }
@@ -91,11 +109,13 @@ export async function downloadWorkshopItem({
   itemId, steamcmdPath = 'steamcmd', steamcmdDir, workshopDir,
   appId = DUB_TOGETHER_APP_ID, username = 'anonymous',
   homeDir = process.env.HOME ?? os.homedir(),
+  maxFiles, maxBytes,
   run = runSteamcmd, beforePublish = () => {},
 }) {
   const id = workshopItemId(itemId);
   const gameAppId = workshopAppId(appId);
   const account = steamUsername(username);
+  const limits = workshopLimits({ maxFiles, maxBytes });
   const steamRoot = path.resolve(steamcmdDir);
   const packs = path.resolve(workshopDir);
   await fs.mkdir(steamRoot, { recursive: true, mode: 0o700 });
@@ -122,7 +142,7 @@ export async function downloadWorkshopItem({
     try { if ((await fs.lstat(candidate)).isDirectory()) { source = candidate; break; } } catch {}
   }
   if (!source) throw new Error(`SteamCMD did not provide Workshop item ${id} for app ${gameAppId}; check Steam account, Workshop access and logs`);
-  await checkTree(source);
+  await checkTree(source, limits);
   const target = path.join(packs, `workshop-${id}`);
   // Parse BEFORE publishing the pack to avoid exposing incomplete/malformed media.
   const staging = path.join(packs, `.workshop-${id}-${process.pid}-${Date.now()}`);
