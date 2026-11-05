@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { SessionStore } from '../server/session/store.js';
 import { roleView } from '../web/player/view-state.js';
 import { canRecordSelectedLine } from '../web/player/eligibility.js';
-import { currentStage, reconcileStage } from '../web/admin/stage.js';
+import { currentStage, maxViewableStage, reconcileStage } from '../web/admin/stage.js';
 
 const pack = {
   id: 'pack-one', metadata: { title: 'Example' },
@@ -126,6 +126,10 @@ test('admin moves with the phase while preserving manual navigation within a pha
   assert.equal(reconcileStage(4, 4, 3, false), null, 'reopen roles sends host back');
   assert.equal(reconcileStage(2, 2, 2, true), null, 'a new match overrides remembered navigation');
   assert.equal(reconcileStage(6, 3, 3, false), null, 'future stages are never sticky');
+  assert.equal(maxViewableStage({ ...party, pack, state: 'recording' }), 5, 'review is open while players record');
+  assert.equal(maxViewableStage({ ...party, pack, state: 'assignment' }), 3);
+  assert.equal(reconcileStage(5, 4, 4, false, 5), 5, 'host can stay on review during recording');
+  assert.equal(reconcileStage(6, 4, 4, false, 5), null, 'playback is never viewable early');
 });
 
 test('presence updates advance revision before broadcasting to clients', async () => {

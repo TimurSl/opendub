@@ -24,3 +24,21 @@ test('peaks ignore invalid times and clamp late samples to the final bin', () =>
   assert.equal(peaks.minima[9], -0.5);
   assert.ok(Math.abs(peaks.maxima[9] - 0.6) < 1e-6);
 });
+
+test('quiet waveforms are scaled up to fill the canvas, with a capped gain for silence', async () => {
+  const { waveformGain, samplePeak, livePeak, WAVEFORM_MAX_GAIN } = await import('../web/recorder/live-waveform.js');
+  // A quiet take peaking at 0.05 used to draw ~1px tall; it must now fill the height.
+  assert.ok(Math.abs(waveformGain(0.2) * 0.2 - 1) < 1e-9);
+  assert.equal(waveformGain(1), 1);
+  assert.ok(waveformGain(2) < 1, 'clipping audio is scaled down to fit');
+  assert.equal(waveformGain(0.001), WAVEFORM_MAX_GAIN, 'noise floor is not blown up into a block');
+  assert.equal(waveformGain(0), 1);
+  assert.equal(waveformGain(Number.NaN), 1);
+  assert.ok(Math.abs(samplePeak(new Float32Array([0.01, -0.3, 0.2, Infinity])) - 0.3) < 1e-6);
+  assert.ok(Math.abs(samplePeak(new Float32Array([0.9, 0.1, 0.2]), 1, 3) - 0.2) < 1e-6, 'peak respects the visible range');
+  const peaks = createLivePeaks(1, 10);
+  assert.equal(livePeak(peaks), 0);
+  appendLivePeaks(peaks, 0.1, [0.02, -0.07]);
+  appendLivePeaks(peaks, 0.5, [0.04]);
+  assert.ok(Math.abs(livePeak(peaks) - 0.07) < 1e-6, 'running peak follows the loudest captured sample');
+});

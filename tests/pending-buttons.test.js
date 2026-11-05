@@ -30,3 +30,21 @@ for (const outcome of ['success', 'failure']) {
     assert.equal(button.getAttribute('aria-busy'), undefined);
   });
 }
+
+test('pending select menus are disabled without replacing their options', () => {
+  const pending = new PendingButtons(); const select = new Button();
+  select.tagName = 'SELECT'; select.textContent = 'option text'; select.options = ['', 'a', 'b'];
+  Object.defineProperty(select, 'textContent', {
+    get() { return this.options.join(''); },
+    set() { throw new Error('textContent would delete <option> elements'); },
+  });
+  assert.equal(pending.begin(select, 'Working…'), true);
+  assert.equal(select.disabled, true);
+  assert.equal(select.getAttribute('aria-busy'), 'true');
+  pending.apply();
+  assert.equal(pending.has(select), true);
+  pending.finish(select);
+  assert.equal(select.disabled, false);
+  assert.deepEqual(select.options, ['', 'a', 'b']);
+  assert.equal(pending.has(select), false);
+});
