@@ -1,4 +1,4 @@
-import { createLivePeaks, appendLivePeaks } from './live-waveform.js';
+import { createLivePeaks, appendLivePeaks, waveformGain, samplePeak, livePeak } from './live-waveform.js';
 import { captureTail, capturePlan, recordedTail } from './cue-timing.js';
 
 const CAPTURE_PRIME_MS = 180; // Start the encoder before the video cue (avoid losing the first phoneme).
@@ -131,7 +131,25 @@ export class LineRecorder {
     this.reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     this.countdown.hidden = true; this.waveform.hidden = false;
     if (this.progress) this.progress.hidden = true;
+    // The canvas bitmap follows its CSS box; redraw whenever the layout changes
+    // (rotation, window resize, panel revealed) so the waveform never stays a
+    // stale, stretched or zero-sized drawing.
+    this.resizeListener = () => { this.lastWaveformDrawAt = 0; this.drawWaveform(); };
+    if (typeof ResizeObserver === 'function') {
+      this.waveformObserver = new ResizeObserver(this.resizeListener); this.waveformObserver.observe(this.waveform);
+    } else window.addEventListener('resize', this.resizeListener);
     this.drawWaveform(true); this.updateControls();
+  }
+  // Peak amplitude of a decoded sample buffer, cached per buffer.
+  samplesPeak(samples, sampleRate, duration) {
+    if (!samples?.length) return 0;
+    this.peakCache ??= new WeakMap();
+    const limit = Math.min(samples.length, Math.ceil((duration || samples.length / (sampleRate || 1)) * (sampleRate || 1)));
+    const cached = this.peakCache.get(samples);
+    if (cached && cached.limit === limit) return cached.peak;
+    const peak = samplePeak(samples, 0, limit);
+    this.peakCache.set(samples, { limit, peak });
+    return peak;
   }
   renderEffects() {
     if (!this.effects || typeof document.createElement !== 'function' || typeof this.effects.append !== 'function') return;
@@ -1034,7 +1052,7 @@ export class LineRecorder {
     const drawSamples = (samples, sampleRate, sampleDuration, color, alpha, offset = 0) => {
       if (!samples?.length || !sampleRate || !sampleDuration) return;
       context.globalAlpha = alpha; context.strokeStyle = color; context.lineWidth = 1;
-      const scale = height * 0.43; const columns = Math.max(1, Math.ceil(width));
+      const scale = height * 0.43 * waveformGain(this.samplesPeak(samples, sampleRate, sampleDuration)); const columns = Math.max(1, Math.ceil(width));
       const samplesPerColumn = Math.max(1, Math.ceil(duration * sampleRate / columns));
       for (let column = 0; column < columns; column++) {
         const time = column / columns * duration - offset;
@@ -1046,7 +1064,7 @@ export class LineRecorder {
         let minimum = 0; let maximum = 0;
         for (let index = start; index < end; index++) { minimum = Math.min(minimum, samples[index]); maximum = Math.max(maximum, samples[index]); }
         const x = column / columns * width;
-        context.beginPath(); context.moveTo(x, center - maximum * scale); context.lineTo(x, center - minimum * scale); context.stroke();
+        context.beginPath(); context.moveTo(x, Math.min(center - 0.5, center - maximum * scale)); context.lineTo(x, Math.max(center + 0.5, center - minimum * scale)); context.stroke();
       }
       context.globalAlpha = 1;
     };
@@ -1055,13 +1073,13 @@ export class LineRecorder {
     drawSamples(this.referenceSamples, this.referenceSampleRate, visibleReferenceDuration, '#b093ff', 0.82, leadIn);
     if (isCapturing) {
       context.strokeStyle = '#67e5ff'; context.lineWidth = 1.5; context.globalAlpha = 0.98;
-      const peaks = this.livePeaks; const scale = height * 0.43;
+      const peaks = this.livePeaks; const scale = height * 0.43 * waveformGain(livePeak(peaks));
       for (let bin = 0; bin < peaks.recorded.length; bin++) {
         if (!peaks.recorded[bin]) continue;
         const x = (bin / peaks.binsPerSecond) / duration * width;
         if (x > width) break;
-        context.beginPath(); context.moveTo(x, center - peaks.maxima[bin] * scale);
-        context.lineTo(x, center - peaks.minima[bin] * scale); context.stroke();
+        context.beginPath(); context.moveTo(x, Math.min(center - 0.5, center - peaks.maxima[bin] * scale));
+        context.lineTo(x, Math.max(center + 0.5, center - peaks.minima[bin] * scale)); context.stroke();
       }
       context.globalAlpha = 1;
     } else drawSamples(this.takeSamples, this.takeSampleRate, this.takeDuration, '#67e5ff', 0.98,
@@ -1222,6 +1240,7 @@ export class LineRecorder {
     this.audioContext?.close().catch(() => {});
     document.removeEventListener('visibilitychange', this.visibilityListener);
     window.removeEventListener('pagehide', this.pagehideListener); window.removeEventListener('online', this.onlineListener);
+    this.waveformObserver?.disconnect(); window.removeEventListener('resize', this.resizeListener);
     this.client.removeEventListener('connection', this.reconnectListener);
   }
 }

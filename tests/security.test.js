@@ -64,15 +64,18 @@ test('login cookies carry HttpOnly and SameSite protection, and player cookies c
   assert.equal((await host.request('/api/state?viewer=player', { headers: { Cookie: `${cookie}; ${host.player.cookie}` } })).data.viewer.kind, 'player');
 });
 
-test('admin pages and API enforce the host source-address allowlist, including encoded static routes', async (t) => {
+test('admin API from another address requires the admin token, and plain-HTTP login is refused', async (t) => {
+  // Admin is no longer restricted to the host PC: public admin access uses
+  // opendub-auth tokens (see docs/NIXOS_STANDALONE.md). The static login page
+  // is public; every admin API call still needs the token.
   const host = await startFixtureRuntime(t);
-  async function fromOtherAddress(route, body) {
+  async function fromOtherAddress(route, body, { token = host.adminToken } = {}) {
     return new Promise((resolve, reject) => {
       const request = http.request(host.base + route, {
         localAddress: '127.0.0.2',
         method: body ? 'POST' : 'GET',
         headers: {
-          Authorization: `Bearer ${host.adminToken}`,
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
           ...(body ? { 'Content-Type': 'application/json' } : {}),
         },
       }, (response) => { response.resume(); response.once('end', () => resolve(response.statusCode)); });
@@ -80,12 +83,13 @@ test('admin pages and API enforce the host source-address allowlist, including e
       request.end(body ? JSON.stringify(body) : undefined);
     });
   }
-  // 127.0.0.2 exercises the source-address decision without depending on a LAN
-  // interface in CI. The runtime's host allowlist is 127.0.0.1 / ::1 only.
-  for (const route of ['/admin', '/admin.html', '/%61dmin.html', '/admin/app.js', '/%61dmin/app.js', '/api/admin/packs']) {
-    assert.equal(await fromOtherAddress(route), 403, route);
-  }
-  assert.equal(await fromOtherAddress('/api/admin/login', { token: host.adminToken }), 403);
+  // 127.0.0.2 exercises the non-local source-address path without a LAN interface.
+  assert.equal(await fromOtherAddress('/api/admin/packs', undefined, { token: null }), 401);
+  assert.equal(await fromOtherAddress('/api/admin/packs', undefined, { token: 'wrong-token-wrong-token-wrong-token' }), 401);
+  assert.equal(await fromOtherAddress('/api/admin/packs'), 200);
+  assert.equal(await fromOtherAddress('/api/admin/create-party', {}, { token: null }), 401);
+  // Sending the token over plain HTTP from another machine would leak it.
+  assert.equal(await fromOtherAddress('/api/admin/login', { token: host.adminToken }, { token: null }), 403);
   assert.equal(await fromOtherAddress('/'), 200); // Player entry remains reachable.
 });
 
@@ -287,14 +291,20 @@ test('trusted HTTPS proxy supports joining, cookies, player actions, media, and 
     });
   });
   assert.equal(state.viewer.playerId, joined.data.viewer.playerId);
-  // Proxy trust never grants admin access, even with a valid secret and spoofed client IP.
-  assert.equal((await proxyRequest(host, '/api/admin/login', {
-    body: { token: host.adminToken }, headers: { 'X-Forwarded-For': '127.0.0.1' },
-  })).status, 403);
+  // Proxy trust never grants admin access by itself: a spoofed client IP
+  // without the token is rejected, and only the real admin token works.
   assert.equal((await proxyRequest(host, '/api/admin/packs', {
-    headers: { Authorization: 'Bearer ' + host.adminToken, 'X-Forwarded-For': '127.0.0.1' },
-  })).status, 403);
-  assert.equal((await proxyRequest(host, '/%61dmin.html')).status, 403);
+    headers: { 'X-Forwarded-For': '127.0.0.1', 'X-Real-IP': '127.0.0.1' },
+  })).status, 401);
+  assert.equal((await proxyRequest(host, '/api/admin/login', {
+    body: { token: 'not-the-admin-token-not-the-admin-token' }, headers: { 'X-Forwarded-For': '127.0.0.1' },
+  })).status, 401);
+  assert.equal((await proxyRequest(host, '/api/admin/login', {
+    body: { token: host.adminToken },
+  })).status, 200);
+  assert.equal((await proxyRequest(host, '/api/admin/packs', {
+    headers: { Authorization: 'Bearer ' + host.adminToken },
+  })).status, 200);
 });
 
 test('forwarded HTTPS is ignored without explicit proxy trust, including PUBLIC_LINK', async t => {
