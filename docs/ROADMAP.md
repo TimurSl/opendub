@@ -16,6 +16,7 @@ Each section builds on the current architecture in [DESIGN.md](DESIGN.md): one i
 | Phase | Work | Status |
 | --- | --- | --- |
 | 1 | §1 Avatars and colors | **Done** |
+| 2 | §0.1 rules (take limit, retakes), §2 Library, §3 Export jobs | **Done**, with the gaps listed in each section |
 
 Deviations from the plan are noted in each section as they are implemented.
 
@@ -197,6 +198,14 @@ LibraryEntry = {
 
 **Size:** medium-large. **Risk:** disk usage. Defaults and retention handle it.
 
+**Implemented.** Gaps and deviations:
+
+- Saving, updating, listing, rename/star/delete, retention, validation, local replay, download of takes, and cached renders are done. `server/library.js` has the storage rules.
+- **Not done:** party replay (`scope: 'party'`), the `librarySavePartial` setting, the players' "Past dubs" screen (players can use `GET /api/library` when the host shares it, but there is no list UI yet), and library filtering by anything but pack, player and starred.
+- Finalise-on-shutdown is covered by saving at every commit while the match is in review or playback; `close()` waits for the save queue.
+- There is no `POST /api/library/:id/replay`: local replay is purely client-side on top of `GET /api/library/:id`.
+- `rules` currently holds `mode`, `takeLimit` and `allowPlayerRetakes`. `blind`, `cards` and `lineTimeLimitSec` arrive with the phases that enforce them.
+
 ---
 
 ## 3. Export for players
@@ -229,6 +238,12 @@ LibraryEntry = {
 - `mine.zip` contains only the requester's takes.
 
 **Size:** medium. It shares storage with §2, so build them together.
+
+**Implemented.** Jobs, formats `mp4` and `m4a`, streamed `takes.zip` and `mine.zip`, `exportAccess`, and library-stored renders are done. Notes:
+
+- `takes.zip` and `mine.zip` are streamed directly (not jobs), because there is no temporary file to track.
+- `POST /api/admin/export` stays as a blocking compatibility wrapper that always renders fresh.
+- **Not done:** the credits overlay (drawtext) and share links, both optional in the plan.
 
 ---
 

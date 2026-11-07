@@ -106,6 +106,12 @@
       <section id="playback-panel" class="final-screen" hidden aria-label="Watch the final dub">
         <div id="playback-root"></div>
       </section>
+      <section id="exports-section" class="exports-section" hidden aria-labelledby="exports-heading">
+        <h3 id="exports-heading">Take the dub home</h3>
+        <div class="actions"><button id="export-video" type="button">VIDEO (MP4)</button><button id="export-audio" type="button">AUDIO (M4A)</button><a class="button-link" href="/exports/takes.zip" download>ALL TAKES</a><a id="export-mine" class="button-link" href="/exports/mine.zip" download>MY TAKES</a></div>
+        <p id="export-status" class="help" role="status" aria-live="polite"></p>
+        <ul id="export-jobs" class="export-jobs" aria-label="Exports"></ul>
+      </section>
     </div>
   </main>
   <script type="module" src="/player/app.js"></script>

@@ -289,3 +289,29 @@ footer { max-width:1260px; padding:0 24px 24px; margin:auto; color:var(--muted);
 }
 #phase, #recording-state { text-transform:none; }
 .role-owner { display:block; margin:3px 0 2px; }
+
+.topbar-actions { display:flex; align-items:center; gap:14px; }
+.topbar-actions button { min-height:36px; padding:4px 14px; }
+.button-link { display:inline-flex; align-items:center; min-height:44px; padding:8px 16px; border:1px solid var(--blue); border-radius:5px; color:var(--blue); background:white; font-weight:600; text-decoration:none; }
+.inline-check { display:flex; align-items:center; gap:8px; margin:0; }
+.library-filters, .sharing-controls { display:flex; flex-wrap:wrap; gap:14px 20px; align-items:end; margin-bottom:16px; }
+.library-filters label:not(.inline-check), .sharing-controls label:not(.inline-check) { min-width:200px; }
+.library-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(270px,1fr)); gap:16px; }
+.library-card { display:flex; flex-direction:column; gap:6px; padding:12px; border:1px solid var(--border); border-radius:7px; background:var(--surface); }
+.library-card.is-damaged { border-color:var(--danger); }
+.library-card h3 { margin:0; overflow-wrap:anywhere; }
+.library-card p { margin:0; }
+.library-card .small { font-size:13px; }
+.library-card-head { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; }
+.icon-button { min-height:36px; min-width:36px; padding:0 8px; font-size:20px; line-height:1; }
+.library-thumb { aspect-ratio:16/9; border-radius:5px; background:#d8e2ec; overflow:hidden; }
+.library-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+.library-cast { display:flex; flex-wrap:wrap; gap:4px; align-items:center; }
+.library-actions { gap:6px; margin-top:4px; }
+.library-actions button, .library-actions .button-link { min-height:36px; padding:4px 10px; font-size:14px; }
+.library-replay { margin-bottom:16px; padding:12px; border:1px solid var(--border); border-radius:7px; }
+.export-jobs { list-style:none; margin:10px 0 0; padding:0; display:grid; gap:6px; }
+.export-job { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
+.export-job progress { flex:1 1 140px; max-width:260px; }
+.job-label { font-weight:650; min-width:96px; }
+.job-error { color:var(--danger); }

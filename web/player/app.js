@@ -90,6 +90,31 @@ $('join-form').addEventListener('submit', async event => {
   } catch (problem) { error(problem); }
   finally { $('join-button').disabled = false; }
 });
+async function startExport(format) {
+  const button = $(format === 'mp4' ? 'export-video' : 'export-audio'); button.disabled = true; clearNotice();
+  try { await client.request('/api/exports', { format }); $('export-status').textContent = 'Rendering. This page updates when it is ready.'; }
+  catch (problem) { error(problem); }
+  finally { button.disabled = false; }
+}
+$('export-video').addEventListener('click', () => startExport('mp4'));
+$('export-audio').addEventListener('click', () => startExport('m4a'));
+function renderExports(snapshot, visible) {
+  const { session } = snapshot;
+  const show = visible && !!session.exportsAllowed && ['review', 'playback'].includes(session.state) && !!session.pack;
+  $('exports-section').hidden = !show;
+  if (!show) return;
+  const mine = (queueLines => queueLines.some(id => session.lineTakes[id]?.status === 'accepted'))(snapshot.queue?.lines || []);
+  $('export-mine').hidden = !mine;
+  const list = $('export-jobs'); list.replaceChildren();
+  for (const job of session.exports || []) {
+    const row = node('li', undefined, 'export-job'); const label = job.format === 'mp4' ? 'Video' : 'Audio';
+    row.append(node('span', label));
+    if (job.status === 'ready') { const link = node('a', 'DOWNLOAD', 'button-link'); link.href = job.url; link.download = job.filename; row.append(link); }
+    else if (job.status === 'failed') row.append(node('span', 'This export failed. Ask the host to try again.', 'job-error'));
+    else { const bar = node('progress'); bar.max = 1; bar.value = job.status === 'queued' ? 0 : job.progress; bar.setAttribute('aria-label', label + ' export progress'); row.append(bar); }
+    list.append(row);
+  }
+}
 let profilePicker = null; let profileEditorOpen = false;
 async function changeProfile(patch) {
   const status = $('profile-status');
@@ -292,6 +317,7 @@ function render(snapshot) {
   $('playback-panel').hidden = !finalPlayback;
   $('waiting-panel').hidden = showRoles || recording || finalPlayback;
   renderProfile(snapshot, !recording && !finalPlayback);
+  renderExports(snapshot, !recording);
   $('recording-panel').style.setProperty('--chip', colorHex(player?.color));
   const showLineNavigation = hasTasks && ['recording', 'review', 'paused'].includes(session.state);
   $('line-navigation').hidden = !showLineNavigation;

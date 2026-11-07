@@ -4,6 +4,7 @@ import { filterPacks } from './pack-filters.js';
 import { PendingButtons } from './pending-buttons.js';
 import { currentStage, maxViewableStage, reconcileStage } from './stage.js';
 import { renderPlayerChip } from '../shared/identity.js';
+import { initLibrary } from './library.js';
 import { colorHex } from '../shared/identity-data.js';
 
 const $ = id => document.getElementById(id);
@@ -41,7 +42,7 @@ function beginPending(button, label = 'Working…') {
 function endPending(button) {
   pendingButtons.finish(button, rerender);
 }
-function showLogin() { $('admin-panel').hidden = true; $('login-panel').hidden = false; }
+function showLogin() { $('admin-panel').hidden = true; $('login-panel').hidden = false; $('library-toggle').hidden = true; }
 // `key` de-duplicates repeated clicks. Per-item actions (assigning one
 // character, accepting one take) use their own key so quick changes to two
 // different rows are both sent.
@@ -152,6 +153,7 @@ function readSessionSettings() {
     referencePlaybackEnabled: $('reference-enabled').checked,
     voiceEffectsEnabled: $('effects-enabled').checked,
     compactMobilePreferred: $('compact-mobile').checked,
+    exportAccess: $('export-access').value, libraryVisibleToPlayers: $('library-visible').checked,
     rules: { mode: $('game-mode').value, takeLimit: Number($('take-limit').value || 0), allowPlayerRetakes: $('allow-retakes').checked },
   };
 }
@@ -235,34 +237,49 @@ $('restart-playback').addEventListener('click', () => quietly(action('restart-pl
 $('stop-playback').addEventListener('click', () => quietly(action('stop-playback', {}, $('stop-playback'))));
 $('line-filter').addEventListener('change', () => { if (client.state) renderTakes(client.state.session); });
 function nextMatch(button) {
-  if (!window.confirm('Start the next match?\n\nAll takes from this match are deleted (export the video first if you want to keep it). Players stay in the party.')) return;
+  if (!window.confirm('Start the next match?\n\nThis match is saved in the library, so you can replay and export it later. Players stay in the party.')) return;
   quietly(action('next-match', {}, button));
 }
 $('next-match-review').addEventListener('click', () => nextMatch($('next-match-review')));
 $('next-match-playback').addEventListener('click', () => nextMatch($('next-match-playback')));
-$('export-video').addEventListener('click', async () => {
-  const button = $('export-video');
-  if (!beginPending(button, 'Exporting…')) return;
-  const matchId = client.state?.session.matchId;
-  $('export-status').textContent = 'Building the video and mixing accepted takes. This may take a minute…'; clearError();
+// Exports are background jobs: starting one returns immediately and progress arrives in the snapshot.
+async function startExport(button, format, label) {
+  if (!beginPending(button, 'Starting…')) return;
+  clearError();
   try {
-    const result = await client.request('/api/admin/export', {});
-    if (!matchId || client.state?.session.matchId !== matchId) {
-      $('export-status').textContent = 'The match changed while exporting. Start a new export from the current match.';
-      return;
-    }
-    const download = node('a'); download.href = result.url; download.download = result.filename;
-    document.body.append(download); download.click(); download.remove();
-    $('export-status').textContent = 'Export is ready. Your browser is downloading the MP4.';
+    await client.request('/api/exports', { format, force: true });
+    $('export-status').textContent = `${label} export started. You can leave this page; it keeps rendering.`;
   } catch (problem) { $('export-status').textContent = ''; error(problem); }
   finally { endPending(button); }
-});
+}
+$('export-video').addEventListener('click', () => startExport($('export-video'), 'mp4', 'Video'));
+$('export-audio').addEventListener('click', () => startExport($('export-audio'), 'm4a', 'Audio'));
+for (const id of ['export-access', 'library-visible']) $(id).addEventListener('change', () => quietly(saveSettings()));
+function renderExports(session) {
+  const visible = ['review', 'playback'].includes(session.state) && !!session.pack;
+  $('exports-panel').hidden = !visible;
+  if (!visible) return;
+  const settings = session.settings || {};
+  if (document.activeElement !== $('export-access')) $('export-access').value = settings.exportAccess || 'host';
+  if (document.activeElement !== $('library-visible')) $('library-visible').checked = !!settings.libraryVisibleToPlayers;
+  const list = $('export-jobs'); list.replaceChildren();
+  for (const job of (session.exports || []).filter(item => item.source === 'live')) {
+    const row = node('li', undefined, 'export-job'); row.dataset.status = job.status;
+    const label = job.format === 'mp4' ? 'Video (MP4)' : 'Audio (M4A)';
+    row.append(node('span', label, 'job-label'));
+    if (job.status === 'ready') { const link = node('a', 'Download', 'job-link'); link.href = job.url; link.download = job.filename; row.append(link); }
+    else if (job.status === 'failed') row.append(node('span', job.error || 'Export failed', 'job-error'));
+    else { const bar = node('progress'); bar.max = 1; bar.value = job.status === 'queued' ? 0 : job.progress; bar.setAttribute('aria-label', `${label} progress`); row.append(bar, node('span', job.status === 'queued' ? 'Waiting for another render' : `${Math.round(job.progress * 100)}%`, 'muted')); }
+    list.append(row);
+  }
+}
 client.addEventListener('connection', event => {
   $('connection').textContent = event.detail ? 'Connected' : 'Reconnecting…';
   $('connection').classList.toggle('is-online', !!event.detail);
   $('connection').classList.toggle('is-offline', !event.detail);
 });
-client.addEventListener('state', event => render(event.detail));
+const library = initLibrary({ client, quietly, onError: error });
+client.addEventListener('state', event => { render(event.detail); renderExports(event.detail.session); library.update(event.detail); });
 
 // ---------------------------------------------------------------- pack list
 const packFilterKey = 'open-dub-pack-filters';

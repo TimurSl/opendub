@@ -11,7 +11,7 @@
   <header>
     <div class="topbar">
       <div class="brand">Open Dub <small>Host studio</small></div>
-      <span id="connection" class="connection" role="status">Host studio</span>
+      <span class="topbar-actions"><button id="library-toggle" type="button" class="secondary" aria-expanded="false" aria-controls="library-panel" hidden>Library</button><span id="connection" class="connection" role="status">Host studio</span></span>
     </div>
   </header>
   <main>
@@ -23,6 +23,20 @@
         <div class="field"><label for="admin-token">Admin token</label><input id="admin-token" type="password" autocomplete="off" spellcheck="false" required></div>
         <button id="login-button">Open studio</button>
       </form>
+    </section>
+    <section id="library-panel" class="panel library-panel" hidden aria-labelledby="library-title">
+      <div class="section-heading"><div><p class="eyebrow">LIBRARY</p><h2 id="library-title">Saved dubs</h2><p class="muted">Every finished match is saved here automatically and survives restarts and Next match.</p></div></div>
+      <div class="library-filters">
+        <label for="library-pack">Pack<select id="library-pack"><option value="">All packs</option></select></label>
+        <label for="library-player">Player<select id="library-player"><option value="">Everyone</option></select></label>
+        <label class="inline-check" for="library-starred"><input id="library-starred" type="checkbox"> Starred only</label>
+      </div>
+      <section id="library-replay" class="library-replay" hidden aria-label="Replay">
+        <div class="section-heading"><h3 id="library-replay-title"></h3><button id="library-replay-close" type="button" class="secondary">Close replay</button></div>
+        <div id="library-replay-root" class="final-playback"></div>
+      </section>
+      <div id="library-grid" class="library-grid"></div>
+      <p id="library-status" class="help" role="status" aria-live="polite"></p>
     </section>
     <div id="admin-panel" hidden>
       <div class="admin-heading">
@@ -191,9 +205,18 @@
         <section class="panel">
           <div class="section-heading"><div><p class="eyebrow">FINAL PLAYBACK</p><h2>The finished dub</h2><p id="final-summary" class="muted"></p></div></div>
           <div id="playback-root" class="final-playback"></div>
-          <div class="actions final-actions"><button id="restart-playback" type="button" class="secondary">Play again for everyone</button><button id="stop-playback" type="button" class="secondary">Back to review</button><button id="export-video" type="button">Export video</button><button id="next-match-playback" type="button" class="secondary push-end">Next match…</button></div>
-          <p id="export-status" class="help" role="status" aria-live="polite"></p>
+          <div class="actions final-actions"><button id="restart-playback" type="button" class="secondary">Play again for everyone</button><button id="stop-playback" type="button" class="secondary">Back to review</button><button id="next-match-playback" type="button" class="secondary push-end">Next match…</button></div>
         </section>
+      </section>
+      <section id="exports-panel" class="panel exports-panel" hidden aria-labelledby="exports-title">
+        <div class="section-heading"><div><p class="eyebrow">EXPORT</p><h2 id="exports-title">Take the dub home</h2><p class="muted">Renders run in the background, one at a time. You can leave this page.</p></div></div>
+        <div class="actions"><button id="export-video" type="button">Export video (MP4)</button><button id="export-audio" type="button" class="secondary">Export audio (M4A)</button><a id="export-takes" class="button-link secondary" href="/exports/takes.zip" download>Download takes (ZIP)</a></div>
+        <p id="export-status" class="help" role="status" aria-live="polite"></p>
+        <ul id="export-jobs" class="export-jobs" aria-label="Exports"></ul>
+        <div class="sharing-controls">
+          <label for="export-access">Who can download exports<select id="export-access"><option value="host">Only me</option><option value="players-after-playback">Players, after final playback starts</option><option value="players">Players, any time</option></select></label>
+          <label class="inline-check" for="library-visible"><input id="library-visible" type="checkbox"> Players can see the library</label>
+        </div>
       </section>
     </div>
   </main>

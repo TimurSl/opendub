@@ -110,7 +110,7 @@ All mutation requests are JSON except multipart take uploads. Errors return `{ "
 | `POST /api/admin/create-party` | `{}` | Creates/replaces the party and invalidates old invites and credentials |
 | `POST /api/admin/select` | `{packId, partyId}` | Starts a new match in the existing party |
 | `POST /api/admin/next-match` | `{}` | Clears match data and returns to pack selection |
-| `POST /api/admin/settings` | `{gameMode, ...settings}` | Saves host settings, including the default Character mode, before assignment opens; settings persist between matches |
+| `POST /api/admin/settings` | `{gameMode, rules?, exportAccess?, libraryVisibleToPlayers?, ...settings}` | Saves host settings before assignment opens; settings persist between matches. `rules` is validated by `validateRules` and `gameMode` is an alias of `rules.mode`. After setup closes only `exportAccess` and `libraryVisibleToPlayers` may change (everything else must be identical, else 409) |
 | `POST /api/admin/assign` | `{character, playerId, matchId}` | Assigns/reassigns one character |
 | `POST /api/admin/deal-lines` | `{matchId}` | Shuffles all tasks and deals them round robin to currently connected players; Line mode only, assignment only |
 | `POST /api/admin/assign-line` | `{lineId, playerId, matchId}` (`playerId: ""` unassigns) | Assigns, moves, or unassigns one line; Line mode only |
@@ -130,6 +130,16 @@ All mutation requests are JSON except multipart take uploads. Errors return `{ "
 | `GET /api/state` | — | Role-specific snapshot |
 | `POST /api/takes/:lineId` | multipart field `take`, `X-Match-ID` and optional `X-Retake-ID` headers | Stores a current-match candidate owned by the authenticated player; replacement uploads must carry their active retake ID |
 | `POST /api/takes/:lineId/accept` | `{takeId, matchId, retakeId?}` | Accepts the candidate; replacement acceptance atomically swaps the accepted take |
+| `POST /api/exports` | `{format: 'mp4' \| 'm4a', force?}` | Queues a render job for the live match. Admin always; players when `exportAccess` allows (`players`, or `players-after-playback` once playback started). An identical queued, running or ready job is reused; only admins may `force`. Progress appears in `session.exports[]` |
+| `GET /exports/:id` | — | Downloads a ready job. Admin, or a player while exports are shared for this match |
+| `GET /exports/takes.zip` / `mine.zip` | — | Streams a store-only ZIP of every accepted take (`NN_character_player.ext` plus `credits.txt`), or only the caller's takes (`mine.zip`, players only). Same access rule; no file is written to disk |
+| `POST /api/admin/export` / `GET /api/admin/exports/:id` | `{matchId}` | Compatibility: renders a fresh MP4 and waits for it |
+| `GET /api/library` | — | List saved dubs. Admin; players only while `libraryVisibleToPlayers` |
+| `GET /api/library/:id` | — | Manifest with authenticated take URLs, `replay: {replayable, reason?, videoUrl, backingTrackUrl}`, and which cached renders exist |
+| `PATCH /api/library/:id` | `{title?, starred?}` | Admin: rename or star |
+| `DELETE /api/library/:id` | — | Admin: delete the entry and its files |
+| `POST /api/library/:id/export` | `{format}` | Admin: returns `{ready, url}` when a cached render exists, else queues a job from the saved takes (pack must still be installed and identical) |
+| `GET /library-media/:id/:file` | — | Manifest-listed takes, `thumb.jpg`, cached `export.mp4`/`export.m4a`, `takes.zip`, and `video`/`backing` from the installed pack while its fingerprint matches. Range requests supported |
 | `GET /media/:packId/:assetId` | — | Authenticated, selected-pack allowlisted assets; range requests supported |
 | `GET /takes/:takeId` | — | Authenticated accepted take or candidate; a replacement candidate is visible only to its owning player |
 | `GET /ws` | authenticated upgrade | Full state snapshots, no client gameplay authority |
@@ -185,6 +195,16 @@ The recording comparison decodes time-domain samples for the original/reference 
 Final playback preloads the backing track and accepted takes, decodes them into Web Audio buffers, and schedules them against a single `AudioContext` clock. The backing starts at timeline zero and each take starts at the Workshop line start. Clip accepted voice duration to the corresponding line window so an overlong take cannot run indefinitely. Overlapping takes mix naturally. The visual video is muted and follows that timeline; seeking/rejoining rebuilds the schedule with offsets. Do not use independent JavaScript timers for each line.
 
 The host broadcasts one future playback epoch. Browsers estimate their offset to the server clock, preload audio, and schedule a common start. Late joiners enter at the elapsed timeline time. Network timing affects when a browser begins watching, never where a take belongs in the dub. This is best-effort shared playback, not sample-perfect synchronization between devices.
+
+## Library and exports
+
+Rules (`data.rules`): `{mode, takeLimit, allowPlayerRetakes}`, validated by `server/session/rules.js` and locked when role selection opens. `takeLimit` counts stored uploads per line (a host retake or reassignment starts a new count) and is checked in `storeTake`, `beginRetake` and `discardCandidate`, so direct API calls cannot bypass it. `session.takesUsed` shows the viewer's counts.
+
+The **library** (`server/library.js`) is the one deliberate exception to "a restart clears recordings". `store.onCommit` runs after every committed mutation and before obsolete take files are deleted. Whenever the match is in `review` or `playback`, `Library.syncMatch` saves or updates `data/library/<entryId>/` (`manifest.json`, `takes/line-N.media` hard-linked or copied, optional `thumb.jpg`, `export.mp4`/`export.m4a`). Matches abandoned while recording are never saved. Manifests are written to a temporary file and renamed; they carry `version: 1`, the pack fingerprint (hash of line data and media sizes), a rules snapshot, players (no credentials), lines with take metadata including the recorder profile, and `starred`.
+
+At startup every manifest is validated (schema, take file names matching `^[A-Za-z0-9_-]+\.media$`, take files present); invalid entries are listed as damaged and never served. Files are resolved only from names the manifest lists, then checked with `realpath` against the entry directory. Retention (`LIBRARY_MAX_ENTRIES`, default 200; `LIBRARY_MAX_BYTES`, default 10 GB) prunes the oldest unstarred entries; `LIBRARY=off` disables saving. A cached render is dropped when the entry's takes change.
+
+**Export jobs** (`server/exports.js`) render one at a time. `-progress pipe:1` feeds `progress` into the snapshot (throttled to about one update per 750 ms). A job is tied to its match: if the match changes, the job fails with "The match changed" and its file is deleted. A finished live render is also stored in the matching library entry. Local replay builds a session-shaped object from the manifest and reuses `DubPlayback`.
 
 ## Security and runtime storage
 

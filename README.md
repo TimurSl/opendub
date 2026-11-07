@@ -57,8 +57,14 @@ Typical host workflow:
 5. Check each player's progress and listen to uploaded takes. Request host retakes or move characters or lines as needed. Moving an accepted line keeps the accepted take and its original recorder attribution; an unfinished candidate is cleared.
 6. Start final playback when every required line has an accepted take. Starting with missing lines requires an explicit host choice.
 7. Choose **Next match** from review or final playback to return the same players to the party waiting screen. Choose the same or another pack to start a fresh match.
+8. Every match is saved to the **Library** automatically when it reaches review. Open **Library** in the top bar to replay a saved dub on your screen, export it, download its takes as a ZIP, rename, star (starred dubs are never pruned), or delete it. A replay needs the original pack to be installed unchanged; the takes stay downloadable either way.
+9. On review and playback, **Take the dub home** starts background renders (MP4 video, M4A audio) that keep going if you leave the page, and downloads a ZIP of all takes. Set **Who can download exports** to share them with players, and tick **Players can see the library** to share the library list.
 
-The party invitation, player credentials, nicknames, connections, and host settings, including the selected game mode, last across matches. Each match gets a new match ID; its assignments, readiness, queues, takes, and playback are cleared. Assignment locks the mode for that match. Change it from setup for the next match. **Replace party** invalidates the old invitation and player credentials. Restarting the server clears the party and recordings.
+Match setup also has a **Take limit per line** (0 for unlimited; 1 gives one take per line, enforced by the server) and a switch for **Players may retake**.
+
+Library settings: `LIBRARY=off` disables saving, `LIBRARY_MAX_ENTRIES` (default 200) and `LIBRARY_MAX_BYTES` (default 10 GB) bound its size. Saved dubs live in `<data dir>/library`; the live match is still cleared by a restart.
+
+The party invitation, player credentials, nicknames, connections, and host settings, including the selected game mode, last across matches. Each match gets a new match ID; its assignments, readiness, queues, takes, and playback are cleared. Assignment locks the mode for that match. Change it from setup for the next match. **Replace party** invalidates the old invitation and player credentials. Restarting the server clears the party and the live match's recordings; saved library entries survive.
 
 ## Player workflow
 

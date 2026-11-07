@@ -170,3 +170,13 @@ h2 { margin-bottom: 22px; font-size: clamp(28px, 4vw, 42px); font-weight: 550; l
 .roster { display: flex; flex-wrap: wrap; gap: 8px; }
 .roster .player-chip.offline { opacity: .5; }
 .recording-panel { border-top: 4px solid var(--chip, transparent); padding-top: 10px; }
+
+.exports-section { margin: 18px 0; padding: 14px; border: 1px solid var(--border); border-radius: 6px; }
+.exports-section h3 { margin: 0 0 10px; font-size: 17px; }
+.exports-section .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.exports-section button, .exports-section .button-link { min-height: 48px; padding: 8px 14px; }
+.button-link { display: inline-flex; align-items: center; border: 1px solid #626262; border-radius: 5px; color: var(--ink); background: var(--surface); font-size: 15px; font-weight: 650; text-decoration: none; letter-spacing: .04em; }
+.export-jobs { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.export-job { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.export-job progress { flex: 1 1 120px; }
+.job-error { color: #ff8f8f; }
