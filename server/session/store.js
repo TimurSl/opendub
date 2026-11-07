@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { defaultRules, validateRules } from "./rules.js";
 import { COLOR_IDS, MARKERS, isAvatarId, isColorId } from "../../web/shared/identity-data.js";
 
 export function randomId(bytes = 18) { return randomBytes(bytes).toString("base64url"); }
@@ -32,7 +33,7 @@ export class SessionStore extends EventEmitter {
   reset() {
     this.data = {
       partyCreated: false, id: randomId(), joinToken: randomId(24), matchId: null,
-      state: "lobby", packId: null, players: [],
+      state: "lobby", packId: null, players: [], rules: defaultRules(),
       roleAssignments: record({}), readyPlayers: record({}), rolesLocked: false,
       options: {
         gameMode: "character",
@@ -41,7 +42,7 @@ export class SessionStore extends EventEmitter {
         referencePlaybackEnabled: true, voiceEffectsEnabled: true, compactMobilePreferred: false,
       },
       lineTakes: record({}), replacementTakes: record({}), activeRetakes: record({}),
-      lineAssignments: record({}), lineVersions: record({}), recordingStarted: false, playback: null, pausedFrom: null,
+      lineAssignments: record({}), lineVersions: record({}), takeCounts: record({}), recordingStarted: false, playback: null, pausedFrom: null,
     };
   }
   async init() {
@@ -81,7 +82,7 @@ export class SessionStore extends EventEmitter {
       } catch (error) {
         this.data = oldData;
         this.data.roleAssignments = record(this.data.roleAssignments);
-        for (const key of ["roleAssignments", "lineAssignments", "readyPlayers", "lineTakes", "replacementTakes", "activeRetakes", "lineVersions"]) {
+        for (const key of ["roleAssignments", "lineAssignments", "readyPlayers", "lineTakes", "replacementTakes", "activeRetakes", "lineVersions", "takeCounts"]) {
           this.data[key] = record(this.data[key] ?? {});
         }
         this.pack = oldPack;
@@ -113,6 +114,26 @@ export class SessionStore extends EventEmitter {
   }
   assignedLines(playerId) {
     return this.pack?.lines.filter(line => this.ownerForLine(line.id) === playerId).map(line => line.id) ?? [];
+  }
+  // Uploads stored for the line's current version. Reassigning or a host retake bumps
+  // the version, which starts a fresh count.
+  takeCount(lineId) {
+    const entry = this.data.takeCounts[lineId];
+    return entry && entry.version === (this.data.lineVersions[lineId] ?? 0) ? entry.count : 0;
+  }
+  takeLimitReached(lineId) {
+    const limit = this.data.rules.takeLimit;
+    return limit > 0 && this.takeCount(lineId) >= limit;
+  }
+  takesUsed(viewer) {
+    const used = record({});
+    if (!this.pack || !this.data.rules.takeLimit) return used;
+    for (const line of this.pack.lines) {
+      if (viewer.kind === "player" && this.ownerForLine(line.id) !== viewer.playerId) continue;
+      const count = this.takeCount(line.id);
+      if (count) used[line.id] = count;
+    }
+    return used;
   }
   hasActiveRetakes() { return Object.keys(this.data.activeRetakes).length > 0; }
   cancelRetake(lineId) {
@@ -162,6 +183,8 @@ export class SessionStore extends EventEmitter {
       completedLineCount: Object.values(lineTakes).filter(take => take.status === "accepted").length,
       totalLineCount: this.pack?.lines.length ?? 0, playback: this.data.playback,
       settings: { ...this.settings, ...this.data.options },
+      rules: this.data.rules,
+      takesUsed: this.takesUsed(viewer),
     };
     if (viewer.kind === "admin") session.joinToken = this.data.partyCreated ? this.data.joinToken : null;
     return { type: "state", serverId: this.serverId, revision: this.revision, serverTime: Date.now(), viewer, session, queue: viewer.kind === "player" ? this.queue(viewer.playerId) : null };
@@ -191,6 +214,7 @@ export class SessionStore extends EventEmitter {
     this.data.lineAssignments = record({});
     this.data.recordingStarted = false;
     this.data.lineVersions = record({});
+    this.data.takeCounts = record({});
     this.data.playback = null;
     this.data.pausedFrom = null;
     if (this.data.options.maxRolesPerPlayer > 0) {
@@ -214,6 +238,7 @@ export class SessionStore extends EventEmitter {
     this.data.lineAssignments = record({});
     this.data.recordingStarted = false;
     this.data.lineVersions = record({});
+    this.data.takeCounts = record({});
     this.data.playback = null;
     this.data.pausedFrom = null;
   }
@@ -227,7 +252,10 @@ export class SessionStore extends EventEmitter {
   }
   configure(options) {
     if (this.data.state !== "lobby") fail("Session setup is closed", 409);
-    if (options.gameMode !== "character" && options.gameMode !== "line") fail("Invalid game mode");
+    // gameMode is an alias of rules.mode. Either may be sent; rules.mode wins when both are.
+    const requested = validateRules({ ...this.data.rules, ...(options.rules ?? {}), mode: options.rules?.mode ?? options.gameMode ?? this.data.rules.mode }, this.pack);
+    options = { ...options, gameMode: requested.mode };
+    delete options.rules;
     const max = options.maxRolesPerPlayer;
     if (!Number.isInteger(max) || max < 0 || max > (this.pack?.characters.length ?? 1000)) fail("Invalid maximum roles per player");
     if (this.data.options.gameMode !== options.gameMode) {
@@ -237,6 +265,7 @@ export class SessionStore extends EventEmitter {
       this.data.lineAssignments = record({});
       this.data.readyPlayers = record({});
     }
+    this.data.rules = requested;
     this.data.options = { ...this.data.options, ...options };
     if (!this.data.options.allowMultipleRoles && this.data.options.maxRolesPerPlayer > 1) this.data.options.maxRolesPerPlayer = 1;
   }
@@ -504,6 +533,7 @@ export class SessionStore extends EventEmitter {
     if (this.data.state !== "recording") fail("Retakes are only available during recording", 409);
     if (typeof attemptId !== "string" || attemptId.length < 1 || attemptId.length > 128) fail("Invalid retake attempt ID");
     this.requireOwner(playerId, lineId);
+    if (!this.data.rules.allowPlayerRetakes) fail("The host turned off player retakes", 403);
     const accepted = this.data.lineTakes[lineId];
     if (accepted?.status !== "accepted") fail("Only accepted lines can start a replacement retake", 409);
     const existing = this.data.activeRetakes[lineId];
@@ -514,6 +544,7 @@ export class SessionStore extends EventEmitter {
       if (sameAttempt) return existing.id;
       fail(existing.playerId === playerId ? "A retake is already active in another tab" : "Another player is retaking this line", 409);
     }
+    if (this.takeLimitReached(lineId)) fail("Take limit reached for this line. Ask the host for a retake", 409);
     if (this.allComplete()) fail("All lines are complete; new retakes are closed", 409);
     if (Object.values(this.data.activeRetakes).some(retake => retake.playerId === playerId)) fail("Finish or cancel your active retake first", 409);
     const active = { id: randomId(24), attemptId, lineId, playerId, matchId: this.data.matchId, lineVersion: this.data.lineVersions[lineId] ?? 0, acceptedTakeId: accepted.id, startedAt: Date.now() };
@@ -532,6 +563,7 @@ export class SessionStore extends EventEmitter {
     const candidate = this.data.lineTakes[lineId];
     if (!candidate || candidate.status !== "recorded") fail("No unaccepted take to discard", 404);
     if (candidate.playerId !== playerId || candidate.id !== takeId) fail("Take belongs to another player", 403);
+    if (this.takeLimitReached(lineId)) fail("Take limit reached for this line. Accept the take or ask the host for a retake", 409);
     delete this.data.lineTakes[lineId];
     this.completionPhase();
   }
@@ -540,6 +572,7 @@ export class SessionStore extends EventEmitter {
     const line = this.requireOwner(playerId, lineId);
     if ((this.data.lineVersions[lineId] ?? 0) !== lineVersion) fail("Line changed during upload; retry", 409);
     const existing = this.data.lineTakes[lineId];
+    if (this.takeLimitReached(lineId)) fail("Take limit reached for this line. Ask the host for a retake", 409);
     let take;
     if (retakeId) {
       const active = this.data.activeRetakes[lineId];
@@ -556,6 +589,7 @@ export class SessionStore extends EventEmitter {
       take = { id, playerId, matchId, character: line.character, startTime: line.startTime, endTime: line.endTime, status: "recorded", mime, size, leadIn, tail };
       this.data.lineTakes[lineId] = take;
     }
+    this.data.takeCounts[lineId] = { version: lineVersion, count: this.takeCount(lineId) + 1 };
     return take;
   }
   accept(lineId, { playerId, takeId, retakeId } = {}) {

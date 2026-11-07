@@ -325,7 +325,7 @@ export async function createRuntime(options = {}) {
     snapshot(req, res);
   });
   adminAction("settings", {
-    gameMode: "string",
+    gameMode: "string", rules: "object?",
     freeRolePicking: "boolean", allowMultipleRoles: "boolean", maxRolesPerPlayer: "number",
     autoBalanceSuggestions: "boolean", lockRolesWhenReady: "boolean",
     referencePlaybackEnabled: "boolean", voiceEffectsEnabled: "boolean", compactMobilePreferred: "boolean",

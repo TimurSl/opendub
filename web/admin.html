@@ -102,6 +102,8 @@
           <label class="setting"><input id="reference-enabled" type="checkbox"><span><strong>Reference playback</strong><small>Let players hear the original line before recording.</small></span></label>
           <label class="setting"><input id="effects-enabled" type="checkbox"><span><strong>Voice effects</strong><small>Enable Echo, Phone, Robot, AUTO-TUNE, and other capture effects.</small></span></label>
           <label class="setting"><input id="compact-mobile" type="checkbox"><span><strong>Compact controls on phones</strong><small>Use a tighter recording layout on small screens.</small></span></label>
+          <label class="setting setting-number"><span><strong>Take limit per line</strong><small>0 means unlimited. 1 gives each line a single take.</small></span><input id="take-limit" type="number" min="0" max="20" step="1" value="0"></label>
+          <label class="setting"><input id="allow-retakes" type="checkbox" checked><span><strong>Players may retake</strong><small>Off: only you can request retakes.</small></span></label>
           <div class="settings-actions"><p id="settings-status" class="help" role="status" aria-live="polite">Changes save automatically.</p><button id="open-lobby" type="button">Open role selection</button></div>
         </form>
       </section>

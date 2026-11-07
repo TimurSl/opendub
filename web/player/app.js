@@ -24,6 +24,8 @@ function friendlyMessage(problem) {
   ]).has(message)) return message;
   if (/origin|cross-site|proxy protocol/i.test(message)) return 'The host needs to check the proxy connection settings before you can join.';
   if (/already taken/i.test(message)) return 'Someone claimed that character first. Choose another one.';
+  if (/take limit/i.test(message)) return 'You have used all your takes for this line. Ask the host if you need another.';
+  if (/turned off player retakes/i.test(message)) return 'The host turned off retakes for this match.';
   if (/role limit/i.test(message)) return 'You have reached your role limit. Release a character before choosing another.';
   if (/host is assigning/i.test(message)) return 'The host is choosing roles. Wait for an assignment.';
   if (/locked/i.test(message)) return 'The host is getting ready to start. Try READY again.';

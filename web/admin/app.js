@@ -152,6 +152,7 @@ function readSessionSettings() {
     referencePlaybackEnabled: $('reference-enabled').checked,
     voiceEffectsEnabled: $('effects-enabled').checked,
     compactMobilePreferred: $('compact-mobile').checked,
+    rules: { mode: $('game-mode').value, takeLimit: Number($('take-limit').value || 0), allowPlayerRetakes: $('allow-retakes').checked },
   };
 }
 const SETTINGS_HINT = 'Changes save automatically.';
@@ -159,6 +160,10 @@ let settingsChain = Promise.resolve(); let settingsSaving = 0; let settingsMessa
 function setSettingsMessage(message) { settingsMessage = message; $('settings-status').textContent = message; }
 function saveSettings() {
   const settings = readSessionSettings();
+  if (!Number.isInteger(settings.rules.takeLimit) || settings.rules.takeLimit < 0 || settings.rules.takeLimit > 20) {
+    setSettingsMessage('Take limit must be a whole number from 0 to 20.');
+    return Promise.reject(new Error('Invalid take limit'));
+  }
   if (!Number.isInteger(settings.maxRolesPerPlayer) || settings.maxRolesPerPlayer < 0) {
     setSettingsMessage('Maximum roles must be a whole number (0 for no limit).');
     return Promise.reject(new Error('Invalid maximum roles'));
@@ -517,11 +522,14 @@ function renderSetup(session) {
       'reference-enabled': settings.referencePlaybackEnabled,
       'effects-enabled': settings.voiceEffectsEnabled,
       'compact-mobile': settings.compactMobilePreferred,
+      'take-limit': session.rules?.takeLimit ?? 0,
+      'allow-retakes': session.rules?.allowPlayerRetakes ?? true,
     };
     for (const [id, value] of Object.entries(values)) {
       const input = $(id);
       if (document.activeElement === input) continue;
       if (id === 'game-mode') input.value = value;
+      else if (id === 'take-limit') input.value = String(value);
       else if (id === 'max-roles') { input.value = String(value ?? 0); input.max = String(pack.characters.length); }
       else input.checked = !!value;
     }
