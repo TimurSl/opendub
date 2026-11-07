@@ -19,7 +19,7 @@ Each section builds on the current architecture in [DESIGN.md](DESIGN.md): one i
 | 2 | §0.1 rules (take limit, retakes), §2 Library, §3 Export jobs | **Done**, with the gaps listed in each section |
 | 3 | §0.2 redaction, §0.3 reveal, §4 Blind lines | **Done**, with the gaps listed in §4 |
 | 4 | §5 modes: duet, relay, speed, mystery | Not started |
-| 5 | §0.4 server effects, §6 Cards | Not started |
+| 5 | §0.4 server effects, §6 Cards (data-driven decks, batch add in the admin panel) | Not started |
 | 6 | §5 swap (rounds) | Not started |
 
 Deviations from the plan are noted in each section as they are implemented.
@@ -358,8 +358,16 @@ Card = {
 
 ### Decks
 
-- The default deck has about 40 cards in `server/session/cards.js`.
-- Host custom cards: performance and effect kinds only. Effect cards go through the same allowlist validator as Custom. They are saved in party settings, and can be exported and imported as JSON for sharing decks.
+**Cards are data, never code.** No card text, title or effect chain is hardcoded in server or client source.
+
+- **Storage:** cards live in a JSON deck store in the data directory (`<data dir>/cards/decks.json`), loaded and validated at startup and written atomically. The runtime is shipped with a default deck as a plain data file (`server/data/default-cards.json`, about 40 cards). On first start it is copied into the store as an ordinary, editable deck; after that the store is the only source of truth, so a host can edit or delete default cards like any other. A "restore default deck" action re-imports the shipped file as a new deck without overwriting the host's own.
+- **Admin panel:** a Cards section with:
+  - **Batch add:** paste many cards at once, either as JSON (an array of cards, the same format as export) or as plain text with one performance card per line (`Title | Text`). A preview shows which rows are valid and why the rest are rejected, and nothing is saved until the host confirms. Imports are all-or-nothing per confirmation, capped in count and size.
+  - List, search, filter by kind, edit, enable or disable, weight, and delete cards.
+  - Create, rename, duplicate, export and import whole decks as JSON, and choose the deck for the match (`rules.cards.deckId`).
+- **Validation:** every card, from batch add or JSON import, goes through one `validateCard` function: known keys only, bounded text lengths, `kind` in the allowed set, bounded `weight`. Effect cards use the same allowlisted FFmpeg filter validator as Custom (§0.4), so a card cannot carry arbitrary FFmpeg arguments. Constraint cards are built from the fixed set of §4/§5 rule keys, not free text.
+- **API:** `GET /api/admin/cards`, `POST /api/admin/cards/batch` (with `{ dryRun: true }` for the preview), `PATCH` and `DELETE /api/admin/cards/:id`, and deck endpoints beside them. Players never read the deck; they only see the cards dealt to them (§0.2).
+- **Snapshotting:** at deal time the match copies the cards it uses into `data.cards`, so editing or deleting a card mid-match changes nothing for a game in progress, and the library entry (§2) keeps the cards that were played.
 - A deck can be filtered by kind, for example "performance only" for groups without FFmpeg.
 
 ### Dealing (`rules.cards.deal`)
@@ -389,7 +397,7 @@ Card = {
 
 - **Player:** a card shown face-up on their own screen while recording (title + text + icon), and collapsible on mobile. Effect cards show "applied automatically after recording".
 - **Reveal:** cards flip over one player at a time, with a guessing grid and a results table.
-- **Host:** a card overview with re-deal and veto buttons, and a custom deck editor in settings.
+- **Host:** a card overview with re-deal and veto buttons, and the Cards section described under Decks (batch add, deck editor, import and export).
 
 ### Tests
 
