@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import WebSocket from 'ws';
 import { createRuntime } from '../server/index.js';
 
 export const fixtureLines = [
@@ -122,4 +123,24 @@ export async function startFixtureRuntime(t, options = {}) {
 
 export function playerProgress(snapshot, id) {
   return snapshot.session.players.find((player) => player.id === id).progress;
+}
+
+// Settings body for /api/admin/settings with sensible defaults; `rules` is the rules object.
+export const matchSettings = (rules, extra = {}) => ({
+  gameMode: 'character', freeRolePicking: true, allowMultipleRoles: true, maxRolesPerPlayer: 0, autoBalanceSuggestions: true,
+  lockRolesWhenReady: true, referencePlaybackEnabled: true, voiceEffectsEnabled: true, compactMobilePreferred: false, ...(rules ? { rules } : {}), ...extra,
+});
+
+// Opens a player's WebSocket so the server counts them as connected (needed for dealing lines).
+export async function connectPlayer(host, player, t) {
+  const socket = new WebSocket(host.base.replace('http:', 'ws:') + '/ws', { headers: { Cookie: player.cookie } });
+  t.after(() => { if (socket.readyState !== WebSocket.CLOSED) socket.close(); });
+  await new Promise((resolve, reject) => { socket.once('message', resolve); socket.once('error', reject); });
+  return socket;
+}
+
+// A player-scoped POST that carries the current match id.
+export async function playerPost(host, player, route, body = {}) {
+  const state = await host.request('/api/state', { token: player.token });
+  return host.request(route, { method: 'POST', token: player.token, body: { ...body, matchId: state.data.session.matchId } });
 }

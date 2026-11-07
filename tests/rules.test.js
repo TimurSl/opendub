@@ -10,13 +10,26 @@ const settings = (extra = {}) => ({
 
 test('validateRules accepts defaults and rejects unknown keys, bad modes and out-of-range values', () => {
   assert.deepEqual(validateRules({}), defaultRules());
-  assert.deepEqual(validateRules({ takeLimit: 2, mode: 'line' }), { mode: 'line', takeLimit: 2, allowPlayerRetakes: true, blind: { caption: false, reference: false, scene: false, share: 1 } });
+  const line = validateRules({ takeLimit: 2, mode: 'line' });
+  assert.equal(line.mode, 'line'); assert.equal(line.takeLimit, 2); assert.equal(line.allowPlayerRetakes, true);
   assert.deepEqual(validateRules({ blind: { caption: true, share: 0.5 } }).blind, { caption: true, reference: false, scene: false, share: 0.5 });
-  for (const bad of [{ mode: 'duet' }, { takeLimit: -1 }, { takeLimit: 21 }, { takeLimit: 1.5 }, { takeLimit: '1' }, { allowPlayerRetakes: 1 }, { blind: null }, { blind: [] }, { blind: { caption: 'yes' } }, { blind: { share: 2 } }, { blind: { share: -0.1 } }, { blind: { share: NaN } }, { blind: { share: '1' } }, { blind: { surprise: true } }, { cards: {} }]) {
+  for (const mode of ['character', 'line', 'duet', 'relay']) assert.equal(validateRules({ mode }).mode, mode);
+  for (const bad of [{ mode: 'swap' }, { mode: 'speed' }, { takeLimit: -1 }, { takeLimit: 21 }, { takeLimit: 1.5 }, { takeLimit: '1' }, { allowPlayerRetakes: 1 }, { blind: null }, { blind: [] }, { blind: { caption: 'yes' } }, { blind: { share: 2 } }, { blind: { share: -0.1 } }, { blind: { share: NaN } }, { blind: { share: '1' } }, { blind: { surprise: true } }, { cards: {} , mode: 'nope' },
+    { relayEvery: 0 }, { relayEvery: 21 }, { relayEvery: 1.5 }, { speed: { enabled: 'yes' } }, { speed: { lineTimeLimitSec: 2 } }, { speed: { lineTimeLimitSec: 61 } }, { speed: { extra: 1 } }, { speed: null }, { mystery: 1 }, { mystery: true },
+    { cards: { enabled: 1 } }, { cards: { deal: 'per-table' } }, { cards: { kinds: [] } }, { cards: { kinds: ['performance', 'performance'] } }, { cards: { kinds: ['spell'] } }, { cards: { deckId: '../etc' } }, { cards: { deckId: 5 } }, { cards: { surprise: true } }, { cards: null }]) {
     assert.throws(() => validateRules(bad), { status: 400 }, JSON.stringify(bad));
   }
   assert.throws(() => validateRules(null), { status: 400 });
   assert.throws(() => validateRules([]), { status: 400 });
+});
+
+test('speed forces one take and no retakes; mystery and per-character cards need the right mode', () => {
+  const speed = validateRules({ speed: { enabled: true, lineTimeLimitSec: 8 }, takeLimit: 5, allowPlayerRetakes: true });
+  assert.equal(speed.takeLimit, 1); assert.equal(speed.allowPlayerRetakes, false); assert.equal(speed.speed.lineTimeLimitSec, 8);
+  for (const mode of ['line', 'duet', 'relay']) assert.equal(validateRules({ mode, mystery: true }).mystery, true);
+  assert.equal(validateRules({ cards: { enabled: true, deal: 'per-character' } }).cards.deal, 'per-character');
+  assert.throws(() => validateRules({ mode: 'duet', cards: { deal: 'per-character' } }), { status: 400 });
+  assert.deepEqual(validateRules({ cards: { kinds: ['constraint', 'performance'] } }).cards.kinds, ['performance', 'constraint']);
 });
 
 async function startMatch(t, rules) {

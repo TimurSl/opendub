@@ -5,6 +5,7 @@ import http from "node:http";
 import https from "node:https";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -13,7 +14,8 @@ import { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack } from "./
 import { SessionStore, fail, randomId } from "./session/store.js";
 import { Library, packFingerprint } from "./library.js";
 import { ExportManager, zipEntries, streamZip, EXPORT_FORMATS } from "./exports.js";
-import { parseCustomAudioArgs, runCustomAudio } from "./custom-audio.js";
+import { parseCustomAudioArgs, runCustomAudio, CustomAudioError } from "./custom-audio.js";
+import { CardStore, CARD_LIMITS, parseBatch, previewBatch, validateCard } from "./cards.js";
 import { soundpadFormat, checkSoundpadFile, runSoundpadAudio } from "./soundpad-audio.js";
 import { downloadWorkshopItem, workshopItemId, workshopAppId, workshopLimits, steamUsername, DUB_TOGETHER_APP_ID } from "./workshop/downloader.js";
 import { secureEquals, initializeAdminToken, readAdminToken, tokenFile, parseWireGuardCidrs, wireGuardAddressAllowed } from "./admin-auth.js";
@@ -184,6 +186,22 @@ export async function createRuntime(options = {}) {
   }).init();
   const transcodeVideo = options.transcodeVideo ?? process.env.TRANSCODE_VIDEO === "1";
   const ffmpegPath = options.ffmpegPath ?? process.env.FFMPEG_PATH ?? "ffmpeg";
+  // Cards live in <data dir>/cards/decks.json. The store ships empty: the host adds every card.
+  const cardStore = await new CardStore({ dir: path.join(dataDir, "cards") }).init();
+  store.cardPool = (deckId, kinds) => cardStore.pool(deckId, kinds);
+  // Effect cards need FFmpeg. The admin panel greys that kind out when it is missing. Probed once, on first
+  // use, in a scratch directory so a wrapper script can never leave files in the working directory.
+  let ffmpegProbe = null;
+  const ffmpegAvailable = () => ffmpegProbe ??= (async () => {
+    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "open-dub-probe-"));
+    try {
+      return await new Promise(resolve => {
+        const child = spawn(ffmpegPath, ["-version"], { stdio: "ignore", shell: false, cwd: scratch });
+        child.once("error", () => resolve(false));
+        child.once("close", code => resolve(code === 0));
+      });
+    } finally { await fs.rm(scratch, { recursive: true, force: true }).catch(() => {}); }
+  })();
   let activeCustomAudioJobs = 0;
   const steamcmdPath = options.steamcmdPath ?? process.env.STEAMCMD_PATH ?? '';
   const steamcmdDir = path.resolve(options.steamcmdDir ?? process.env.STEAMCMD_DIR ?? path.join(dataDir, 'steamcmd'));
@@ -198,7 +216,9 @@ export async function createRuntime(options = {}) {
     res.set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
     try { if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) checkOrigin(req, trustedProxy); next(); } catch (error) { next(error); }
   });
-  app.use(express.json({ limit: "16kb", strict: true }));
+  // Batch card imports are the one route that may send more than a few kilobytes (parsed after auth, below).
+  const jsonBody = express.json({ limit: "16kb", strict: true });
+  app.use((req, res, next) => req.path === "/api/admin/cards/batch" ? next() : jsonBody(req, res, next));
   app.get("/api/config", (req, res) => res.json({ publicLink }));
   function auth(req, requireKind) {
     const cookie = cookies(req);
@@ -287,6 +307,62 @@ export async function createRuntime(options = {}) {
     });
     snapshot(req, res);
   });
+  // ------------------------------------------------------------ card decks (admin, not match-scoped)
+  const decksView = async extra => ({ decks: cardStore.list(), limits: CARD_LIMITS, ffmpeg: await ffmpegAvailable(), ...extra });
+  const deckId = req => { if (!/^[A-Za-z0-9_-]{1,64}$/.test(req.params.id)) fail("Unknown deck", 404); return req.params.id; };
+  app.get("/api/admin/cards", authenticated("admin"), async (req, res) => res.json(await decksView()));
+  app.post("/api/admin/cards", authenticated("admin"), async (req, res) => {
+    const body = validateBody(req, { deckId: "string", card: "object" });
+    await cardStore.addCards(body.deckId, [validateCard(body.card)]);
+    res.json(await decksView());
+  });
+  app.patch("/api/admin/cards/:id", authenticated("admin"), async (req, res) => {
+    const body = validateBody(req, { card: "object" });
+    await cardStore.updateCard(deckId(req), body.card);
+    res.json(await decksView());
+  });
+  app.delete("/api/admin/cards/:id", authenticated("admin"), async (req, res) => {
+    await cardStore.deleteCard(deckId(req));
+    res.json(await decksView());
+  });
+  // Paste many cards at once: JSON (an array, or a deck export) or "Title | Text" lines. With
+  // dryRun it only reports which rows are valid. Saving is all-or-nothing for the rows confirmed.
+  app.post("/api/admin/cards/batch", authenticated("admin"), express.json({ limit: "400kb", strict: true }), async (req, res) => {
+    const body = req.body;
+    if (!body || typeof body !== "object" || Array.isArray(body)) fail("Expected a JSON object");
+    const allowed = { deckId: "string", newDeckName: "string", format: "string", content: "string", dryRun: "boolean", skipInvalid: "boolean" };
+    for (const [key, value] of Object.entries(body)) if (!Object.hasOwn(allowed, key) || typeof value !== allowed[key]) fail("Invalid " + key.slice(0, 40));
+    const { entries, name } = parseBatch(body.format, body.content);
+    const rows = previewBatch(entries);
+    const valid = rows.filter(row => row.ok);
+    const summary = rows.map(row => row.ok ? { index: row.index, ok: true, title: row.card.title, text: row.card.text, kind: row.card.kind } : row);
+    if (body.dryRun) return res.json({ dryRun: true, rows: summary, valid: valid.length, invalid: rows.length - valid.length, suggestedName: name });
+    if (!valid.length) fail("None of these cards are valid");
+    if (valid.length !== rows.length && !body.skipInvalid) fail(`${rows.length - valid.length} of ${rows.length} cards are not valid. Fix them, or import only the valid ones`);
+    if (body.newDeckName !== undefined) await cardStore.createDeck(body.newDeckName, valid.map(row => row.card));
+    else if (typeof body.deckId === "string") await cardStore.addCards(body.deckId, valid.map(row => row.card));
+    else fail("Choose a deck, or name a new one");
+    res.json(await decksView({ imported: valid.length }));
+  });
+  app.post("/api/admin/decks", authenticated("admin"), async (req, res) => {
+    const { name } = validateBody(req, { name: "string" });
+    await cardStore.createDeck(name);
+    res.json(await decksView());
+  });
+  app.patch("/api/admin/decks/:id", authenticated("admin"), async (req, res) => {
+    const { name } = validateBody(req, { name: "string" });
+    await cardStore.renameDeck(deckId(req), name);
+    res.json(await decksView());
+  });
+  app.delete("/api/admin/decks/:id", authenticated("admin"), async (req, res) => {
+    await cardStore.deleteDeck(deckId(req));
+    res.json(await decksView());
+  });
+  app.get("/api/admin/decks/:id/export", authenticated("admin"), (req, res) => {
+    const deck = cardStore.exportDeck(deckId(req));
+    res.set("Content-Disposition", `attachment; filename="open-dub-deck-${deck.name.replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 40) || "deck"}.json"`);
+    res.json(deck);
+  });
   adminAction("create-party", {}, () => store.createParty(), { matchScoped: false });
   app.post("/api/admin/select", authenticated("admin"), async (req, res) => {
     const { packId, partyId } = validateBody(req, { packId: "string", partyId: "string" });
@@ -319,6 +395,11 @@ export async function createRuntime(options = {}) {
   adminAction("review", {}, () => store.openReview());
   adminAction("reveal", {}, () => store.openReveal());
   adminAction("accept-all", {}, () => store.acceptAll());
+  adminAction("cards/deal", {}, () => store.dealCards());
+  adminAction("cards/redeal", { key: "string" }, ({ key }) => store.redealCard(key));
+  adminAction("cards/veto", { key: "string", vetoed: "boolean?" }, ({ key, vetoed }) => store.vetoCard(key, vetoed ?? true));
+  adminAction("cards/open", {}, () => store.openCards());
+  adminAction("clear-redub", { lineId: "string" }, ({ lineId }) => store.clearRedubVotes(lineId));
   adminAction("restart-playback", {}, () => {
     if (store.data.state !== "playback") fail("Playback is not active", 409);
     store.data.playback = { id: randomId(), startsAt: Date.now() + 5000 };
@@ -375,6 +456,8 @@ export async function createRuntime(options = {}) {
   const canExport = viewer => viewer.kind === "admin" || store.exportAllowedForPlayers();
   const requireExportable = viewer => {
     if (!canExport(viewer)) fail("The host has not shared exports yet", 403);
+    // File names carry characters and players, which mystery and cards keep secret until the reveal.
+    if (viewer.kind !== "admin" && (store.secretsActive() || store.cardsHidden())) fail("Exports unlock after the reveal", 403);
     if (!store.pack || !["review", "playback"].includes(store.data.state)) fail("Finish review before exporting", 409);
     if (!acceptedLiveTakes().length) fail("There are no accepted takes to export", 409);
   };
@@ -465,6 +548,9 @@ export async function createRuntime(options = {}) {
   playerAction("claim", { character: "string" }, ({ character }, playerId) => store.claimRole(character, playerId));
   playerAction("release", { character: "string" }, ({ character }, playerId) => store.releaseRole(character, playerId));
   playerAction("ready", { ready: "boolean" }, ({ ready }, playerId) => store.setPlayerReady(playerId, ready));
+  playerAction("redub-vote", { lineId: "string", vote: "boolean" }, ({ lineId, vote }, playerId) => store.setRedubVote(playerId, lineId, vote));
+  playerAction("open-line", { lineId: "string" }, ({ lineId }, playerId) => store.openLine(playerId, lineId));
+  playerAction("guess", { targetPlayerId: "string", cardId: "string" }, ({ targetPlayerId, cardId }, playerId) => store.guessCard(playerId, targetPlayerId, cardId));
   app.post("/api/takes/:lineId/retake", authenticated("player"), async (req, res) => {
     const { matchId, attemptId } = validateBody(req, { matchId: "string", attemptId: "string?" });
     const retakeId = await store.mutate(() => {
@@ -628,12 +714,30 @@ export async function createRuntime(options = {}) {
       upload(req, res, next);
     } catch (error) { next(error); }
   }, async (req, res) => {
-    let destination;
+    let destination; let processedPath;
     let successful = false;
     try {
       if (!req.file) fail("Multipart field take is required");
-      const mime = req.file.recordingMime ?? req.file.mimetype.toLowerCase().split(";")[0].trim();
+      let mime = req.file.recordingMime ?? req.file.mimetype.toLowerCase().split(";")[0].trim();
       await signature(req.file.path, mime);
+      let source = req.file.path; let size = req.file.size;
+      // An effect card is applied here, on the server, to every take its holder uploads: the client
+      // cannot skip it. If it fails nothing is stored, so a previous take stays as it was.
+      const effect = store.effectCardFor(req.params.lineId);
+      if (effect) {
+        if (activeCustomAudioJobs >= 2) fail("The effect processor is busy. Try again in a moment", 429);
+        activeCustomAudioJobs++;
+        try {
+          processedPath = path.join(dataDir, "tmp", `card-${randomId(24)}.webm`);
+          await runCustomAudio(ffmpegPath, req.file.path, processedPath, parseCustomAudioArgs(effect.effect.chain), Math.min(118, store.line(req.params.lineId).duration));
+          const stats = await fs.stat(processedPath);
+          if (!stats.size || stats.size > maxUploadBytes) fail("The effect output exceeded the size limit", 413);
+          source = processedPath; size = stats.size; mime = "audio/webm";
+        } catch (error) {
+          if (error instanceof CustomAudioError) fail(`The "${effect.title}" card effect could not be applied (${error.message}). Your take was not saved`, 422);
+          throw error;
+        } finally { activeCustomAudioJobs--; }
+      }
       const id = randomId(24);
       destination = store.takePath({ id });
       await store.mutate(async () => {
@@ -648,14 +752,15 @@ export async function createRuntime(options = {}) {
         };
         const leadIn = parseTiming('x-take-lead-in', 1);
         const tail = parseTiming('x-take-tail', 2);
-        store.storeTake({ playerId: req.viewer.playerId, lineId: req.params.lineId, id, mime, size: req.file.size, matchId: req.uploadMatchId, previousTakeId: req.previousTakeId, lineVersion: req.uploadLineVersion, retakeId: req.uploadRetakeId, leadIn, tail });
-        await fs.rename(req.file.path, destination);
+        store.storeTake({ playerId: req.viewer.playerId, lineId: req.params.lineId, id, mime, size, matchId: req.uploadMatchId, previousTakeId: req.previousTakeId, lineVersion: req.uploadLineVersion, retakeId: req.uploadRetakeId, leadIn, tail });
+        await fs.rename(source, destination);
         await fs.chmod(destination, 0o600);
       });
       successful = true;
       snapshot(req, res);
     } finally {
       if (req.file) await fs.rm(req.file.path, { force: true }).catch(() => {});
+      if (processedPath) await fs.rm(processedPath, { force: true }).catch(() => {});
       if (!successful && destination) await fs.rm(destination, { force: true }).catch(() => {});
     }
   });
@@ -698,7 +803,7 @@ export async function createRuntime(options = {}) {
     next();
   };
   // Players must not read the live match's own entry (full captions) before the reveal.
-  const hiddenFromPlayers = id => store.secretsActive() && id === library.byMatch.get(store.data.matchId);
+  const hiddenFromPlayers = id => (store.secretsActive() || store.cardsHidden()) && id === library.byMatch.get(store.data.matchId);
   const entryId = req => {
     if (!/^[A-Za-z0-9_-]{8,64}$/.test(req.params.id) || !library.has(req.params.id)) fail("Unknown library entry", 404);
     if (req.viewer.kind !== "admin" && hiddenFromPlayers(req.params.id)) fail("This dub is hidden until the reveal", 403);
