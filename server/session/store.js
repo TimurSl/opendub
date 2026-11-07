@@ -40,9 +40,10 @@ export class SessionStore extends EventEmitter {
         freeRolePicking: true, allowMultipleRoles: true, maxRolesPerPlayer: 0,
         autoBalanceSuggestions: true, lockRolesWhenReady: true,
         referencePlaybackEnabled: true, voiceEffectsEnabled: true, compactMobilePreferred: false,
+        libraryVisibleToPlayers: false, exportAccess: "host",
       },
       lineTakes: record({}), replacementTakes: record({}), activeRetakes: record({}),
-      lineAssignments: record({}), lineVersions: record({}), takeCounts: record({}), recordingStarted: false, playback: null, pausedFrom: null,
+      lineAssignments: record({}), lineVersions: record({}), takeCounts: record({}), recordingStarted: false, playback: null, playbackSeen: false, pausedFrom: null,
     };
   }
   async init() {
@@ -73,6 +74,8 @@ export class SessionStore extends EventEmitter {
       try {
         const result = await operation();
         this.revision++;
+        // Runs before obsolete take files are deleted, so the library can still hard-link them.
+        if (this.onCommit) await Promise.resolve(this.onCommit({ oldData, oldPack, data: this.data, pack: this.pack })).catch(error => console.warn("Commit hook failed:", error.message));
         const currentIds = new Set([...Object.values(this.data.lineTakes), ...Object.values(this.data.replacementTakes ?? {})].map(take => take.id));
         for (const take of [...Object.values(oldData.lineTakes), ...Object.values(oldData.replacementTakes ?? {})]) {
           if (!currentIds.has(take.id)) await fs.rm(this.takePath(take), { force: true }).catch(error => console.warn("Could not remove obsolete take:", error.message));
@@ -135,6 +138,11 @@ export class SessionStore extends EventEmitter {
     }
     return used;
   }
+  // Hosts always may export. Players need exportAccess to allow it (after playback has started, if so configured).
+  exportAllowedForPlayers() {
+    const access = this.data.options.exportAccess;
+    return access === "players" || (access === "players-after-playback" && this.data.playbackSeen);
+  }
   hasActiveRetakes() { return Object.keys(this.data.activeRetakes).length > 0; }
   cancelRetake(lineId) {
     const active = this.data.activeRetakes[lineId];
@@ -185,6 +193,8 @@ export class SessionStore extends EventEmitter {
       settings: { ...this.settings, ...this.data.options },
       rules: this.data.rules,
       takesUsed: this.takesUsed(viewer),
+      exports: this.exportsView ? this.exportsView(viewer) : [],
+      exportsAllowed: viewer.kind === "admin" || this.exportAllowedForPlayers(),
     };
     if (viewer.kind === "admin") session.joinToken = this.data.partyCreated ? this.data.joinToken : null;
     return { type: "state", serverId: this.serverId, revision: this.revision, serverTime: Date.now(), viewer, session, queue: viewer.kind === "player" ? this.queue(viewer.playerId) : null };
@@ -216,6 +226,7 @@ export class SessionStore extends EventEmitter {
     this.data.lineVersions = record({});
     this.data.takeCounts = record({});
     this.data.playback = null;
+    this.data.playbackSeen = false;
     this.data.pausedFrom = null;
     if (this.data.options.maxRolesPerPlayer > 0) {
       this.data.options.maxRolesPerPlayer = Math.min(this.data.options.maxRolesPerPlayer, pack.characters.length);
@@ -240,6 +251,7 @@ export class SessionStore extends EventEmitter {
     this.data.lineVersions = record({});
     this.data.takeCounts = record({});
     this.data.playback = null;
+    this.data.playbackSeen = false;
     this.data.pausedFrom = null;
   }
   requireMatch(matchId) {
@@ -251,7 +263,19 @@ export class SessionStore extends EventEmitter {
     this.data.state = "assignment";
   }
   configure(options) {
-    if (this.data.state !== "lobby") fail("Session setup is closed", 409);
+    if (this.data.state !== "lobby") {
+      // Sharing switches do not change match structure, so the host may flip them at any time.
+      // Everything else must be identical to the current settings, or setup is closed.
+      const sharing = ["libraryVisibleToPlayers", "exportAccess"];
+      const { rules, ...rest } = options;
+      const current = { ...this.data.options };
+      const touchesMatch = Object.keys(rest).some(key => !sharing.includes(key) && current[key] !== rest[key]) ||
+        (rules !== undefined && JSON.stringify(validateRules({ ...this.data.rules, ...rules }, this.pack)) !== JSON.stringify(this.data.rules));
+      if (touchesMatch) fail("Session setup is closed", 409);
+      if (options.exportAccess !== undefined && !["host", "players", "players-after-playback"].includes(options.exportAccess)) fail("Invalid export access");
+      for (const key of sharing) if (options[key] !== undefined) this.data.options[key] = options[key];
+      return;
+    }
     // gameMode is an alias of rules.mode. Either may be sent; rules.mode wins when both are.
     const requested = validateRules({ ...this.data.rules, ...(options.rules ?? {}), mode: options.rules?.mode ?? options.gameMode ?? this.data.rules.mode }, this.pack);
     options = { ...options, gameMode: requested.mode };
@@ -265,6 +289,7 @@ export class SessionStore extends EventEmitter {
       this.data.lineAssignments = record({});
       this.data.readyPlayers = record({});
     }
+    if (options.exportAccess !== undefined && !["host", "players", "players-after-playback"].includes(options.exportAccess)) fail("Invalid export access");
     this.data.rules = requested;
     this.data.options = { ...this.data.options, ...options };
     if (!this.data.options.allowMultipleRoles && this.data.options.maxRolesPerPlayer > 1) this.data.options.maxRolesPerPlayer = 1;
@@ -636,6 +661,7 @@ export class SessionStore extends EventEmitter {
     if (this.hasActiveRetakes()) fail("Players are finishing retakes", 409);
     this.data.state = "playback";
     this.data.playback = { id: randomId(), startsAt: Date.now() + 5000 };
+    this.data.playbackSeen = true;
   }
   stopPlayback() {
     if (this.data.state !== "playback") fail("Playback has not started", 409);

@@ -11,6 +11,8 @@ import { spawn } from "node:child_process";
 import { isIP } from "node:net";
 import { discoverPacks, parseIni, parseWorkshopIni, parseWorkshopPack } from "./workshop/parser.js";
 import { SessionStore, fail, randomId } from "./session/store.js";
+import { Library, packFingerprint } from "./library.js";
+import { ExportManager, zipEntries, streamZip, EXPORT_FORMATS } from "./exports.js";
 import { parseCustomAudioArgs, runCustomAudio } from "./custom-audio.js";
 import { soundpadFormat, checkSoundpadFile, runSoundpadAudio } from "./soundpad-audio.js";
 import { downloadWorkshopItem, workshopItemId, workshopAppId, workshopLimits, steamUsername, DUB_TOGETHER_APP_ID } from "./workshop/downloader.js";
@@ -124,53 +126,6 @@ async function transcode(pack, dataDir, ffmpegPath) {
   pack.assets[assetId] = { path: target, type: "video/mp4", cached: true };
   pack.videoUrl = "/media/" + pack.id + "/" + assetId;
 }
-async function exportDub(pack, dataDir, ffmpegPath, acceptedTakes) {
-  const directory = path.join(dataDir, "exports");
-  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  const id = randomId(18);
-  const output = path.join(directory, id + ".mp4");
-  const work = path.join(directory, id + ".work");
-  await fs.mkdir(work, { recursive: true, mode: 0o700 });
-  const args = ["-hide_banner", "-loglevel", "error", "-i", pack.video, "-i", pack.backingTrack];
-  const voiceInputs = [];
-  try {
-    for (const [index, { take, line }] of acceptedTakes.entries()) {
-      const copy = path.join(work, index + ".audio");
-      await fs.copyFile(take.path, copy);
-      args.push("-i", copy);
-      const leadIn = take.leadIn ?? 0; const tail = take.tail ?? 0;
-      const timelineStart = line.startTime - leadIn;
-      voiceInputs.push({ input: index + 2, delay: Math.max(0, Math.round(timelineStart * 1000)), skip: Math.max(0, -timelineStart), duration: line.duration + leadIn + tail, key: `voice${index}` });
-    }
-    const filters = ["[1:a]asetpts=PTS-STARTPTS[base]"];
-    for (const voice of voiceInputs) filters.push(`[${voice.input}:a]atrim=start=${voice.skip.toFixed(6)}:duration=${voice.duration.toFixed(6)},asetpts=PTS-STARTPTS,adelay=${voice.delay}:all=1[${voice.key}]`);
-    const sources = ["[base]", ...voiceInputs.map(voice => `[${voice.key}]`)].join("");
-    filters.push(`${sources}amix=inputs=${voiceInputs.length + 1}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]`);
-    args.push(
-      "-filter_complex", filters.join(";"), "-map", "0:v:0", "-map", "[aout]",
-      "-vf", "tpad=stop_mode=clone:stop_duration=2", // Let final-line audio finish after the last video frame.
-      "-c:v", "libx264", "-preset", "fast", "-crf", "21", "-pix_fmt", "yuv420p",
-      "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", "-y", output,
-    );
-    await new Promise((resolve, reject) => {
-      const process = spawn(ffmpegPath, args, { stdio: ["ignore", "ignore", "pipe"] });
-      let stderr = "";
-      process.stderr.on("data", chunk => { if (stderr.length < 4000) stderr += chunk; });
-      process.on("error", () => { const error = new Error("ffmpeg is unavailable; install it or set FFMPEG_PATH"); error.status = 503; reject(error); });
-      process.on("exit", code => {
-        if (code === 0) resolve();
-        else { const error = new Error("Video export failed: " + stderr.trim().slice(-1800)); error.status = 422; reject(error); }
-      });
-    });
-    return { id, output };
-  } catch (error) {
-    await fs.rm(output, { force: true }).catch(() => {});
-    throw error;
-  } finally {
-    await fs.rm(work, { recursive: true, force: true }).catch(() => {});
-  }
-}
-
 export async function createRuntime(options = {}) {
   const workshopDir = path.resolve(options.workshopDir ?? process.env.WORKSHOP_DIR ?? process.cwd());
   const dataDir = path.resolve(options.dataDir ?? process.env.DATA_DIR ?? "./data");
@@ -206,10 +161,27 @@ export async function createRuntime(options = {}) {
   await fs.mkdir(workshopDir, { recursive: true, mode: 0o700 });
   const discovered = await discoverPacks(workshopDir);
   const store = await new SessionStore({ packs: discovered.packs, dataDir, previewBefore, previewAfter }).init();
-  const exportDirectory = path.join(dataDir, "exports");
-  await fs.mkdir(exportDirectory, { recursive: true, mode: 0o700 });
-  for (const filename of await fs.readdir(exportDirectory)) await fs.rm(path.join(exportDirectory, filename), { recursive: true, force: true });
-  const exports = new Map();
+  const libraryOff = (options.library ?? process.env.LIBRARY) === "off" || options.library === false;
+  const library = await new Library({
+    dir: path.join(dataDir, "library"), enabled: !libraryOff, ffmpegPath: options.ffmpegPath ?? process.env.FFMPEG_PATH ?? "ffmpeg",
+    maxEntries: Number(options.libraryMaxEntries ?? process.env.LIBRARY_MAX_ENTRIES ?? 200),
+    maxBytes: Number(options.libraryMaxBytes ?? process.env.LIBRARY_MAX_BYTES ?? 10 * 1024 ** 3),
+  }).init();
+  // Save a match whenever it is in review or playback (first save, take replaced, profile changed).
+  // Matches abandoned while recording are never saved.
+  store.onCommit = ({ data, pack }) => {
+    exportManager.forgetMatch(data.matchId).catch(() => {});
+    return ["review", "playback"].includes(data.state)
+      ? library.syncMatch({ matchId: data.matchId, pack, data, takePath: take => store.takePath(take) })
+      : null;
+  };
+  const exportManager = await new ExportManager({
+    directory: path.join(dataDir, "exports"), ffmpegPath: options.ffmpegPath ?? process.env.FFMPEG_PATH ?? "ffmpeg",
+    onChange: () => { store.revision++; store.emit("change"); },
+    resolveSource: job => resolveExportSource(job),
+    onFinished: job => finishExport(job),
+    isStale: job => job.source.kind === "live" && store.data.matchId !== job.source.matchId,
+  }).init();
   const transcodeVideo = options.transcodeVideo ?? process.env.TRANSCODE_VIDEO === "1";
   const ffmpegPath = options.ffmpegPath ?? process.env.FFMPEG_PATH ?? "ffmpeg";
   let activeCustomAudioJobs = 0;
@@ -329,6 +301,7 @@ export async function createRuntime(options = {}) {
     freeRolePicking: "boolean", allowMultipleRoles: "boolean", maxRolesPerPlayer: "number",
     autoBalanceSuggestions: "boolean", lockRolesWhenReady: "boolean",
     referencePlaybackEnabled: "boolean", voiceEffectsEnabled: "boolean", compactMobilePreferred: "boolean",
+    libraryVisibleToPlayers: "boolean?", exportAccess: "string?",
   }, options => store.configure(options), { matchScoped: false });
   adminAction("next-match", {}, () => store.nextMatch(), { matchScoped: false });
   adminAction("open-lobby", {}, () => store.openLobby());
@@ -349,34 +322,111 @@ export async function createRuntime(options = {}) {
     if (store.data.state !== "playback") fail("Playback is not active", 409);
     store.data.playback = { id: randomId(), startsAt: Date.now() + 5000 };
   });
+  // ------------------------------------------------------------ exports
+  const acceptedLiveTakes = () => store.pack ? store.pack.lines.flatMap(line => {
+    const take = store.data.lineTakes[line.id];
+    return take?.status === "accepted" ? [{ take: { ...take, path: store.takePath(take) }, line }] : [];
+  }) : [];
+  const liveTakesKey = () => acceptedLiveTakes().map(({ take }) => take.id).sort().join(",");
+  const liveSource = () => ({ kind: "live", matchId: store.data.matchId, takesKey: liveTakesKey() });
+  const liveSignature = format => `live:${store.data.matchId}:${format}:${liveTakesKey()}`;
+  async function libraryTakes(manifest) {
+    const takes = [];
+    for (const line of manifest.lines) {
+      if (!line.take) continue;
+      const file = await library.resolveFile(manifest.id, line.take.file);
+      if (file) takes.push({ take: { ...line.take, path: file.path }, line: { ...line, duration: line.endTime - line.startTime } });
+    }
+    return takes;
+  }
+  async function resolveExportSource(job) {
+    if (job.source.kind === "live") {
+      if (!store.pack || store.data.matchId !== job.source.matchId) fail("The match changed before the export started", 409);
+      if (liveTakesKey() !== job.source.takesKey) fail("Takes changed while the export was queued", 409);
+      return { pack: store.pack, takes: acceptedLiveTakes() };
+    }
+    const manifest = library.get(job.source.entryId);
+    if (!manifest) fail("The library entry no longer exists", 404);
+    const pack = store.packs.get(manifest.pack.id);
+    if (!pack || await packFingerprint(pack) !== manifest.pack.fingerprint) fail("Install the original pack to export this dub", 409);
+    return { pack, takes: await libraryTakes(manifest) };
+  }
+  // Called with the rendered file in place. Returning false discards it (the match moved on).
+  async function finishExport(job) {
+    const file = "export." + EXPORT_FORMATS[job.format].extension;
+    if (job.source.kind === "library") { await library.storeExport(job.source.entryId, file, job.file); return true; }
+    if (store.data.matchId !== job.source.matchId) return false;
+    const entryId = library.byMatch.get(job.source.matchId);
+    if (entryId) await library.storeExport(entryId, file, job.file).catch(error => console.warn("Could not store export in the library:", error.message));
+    return true;
+  }
+  const jobView = job => ({
+    id: job.id, format: job.format, status: job.status, progress: Math.round(job.progress * 100) / 100, error: job.error,
+    mine: job.requesterId, source: job.source.kind, entryId: job.source.entryId ?? null,
+    url: job.status === "ready" ? "/exports/" + job.id : null, filename: "open-dub-" + job.id.slice(0, 8) + "." + EXPORT_FORMATS[job.format].extension,
+  });
+  store.exportsView = viewer => {
+    const jobs = [...exportManager.jobs.values()];
+    if (viewer.kind === "admin") return jobs.map(jobView);
+    if (!store.exportAllowedForPlayers()) return [];
+    return jobs.filter(job => job.source.kind === "live" && job.source.matchId === store.data.matchId).map(jobView);
+  };
+  const canExport = viewer => viewer.kind === "admin" || store.exportAllowedForPlayers();
+  const requireExportable = viewer => {
+    if (!canExport(viewer)) fail("The host has not shared exports yet", 403);
+    if (!store.pack || !["review", "playback"].includes(store.data.state)) fail("Finish review before exporting", 409);
+    if (!acceptedLiveTakes().length) fail("There are no accepted takes to export", 409);
+  };
+  app.post("/api/exports", authenticated(), async (req, res) => {
+    const { format, force } = validateBody(req, { format: "string", force: "boolean?" });
+    if (!Object.hasOwn(EXPORT_FORMATS, format)) fail("Unknown export format");
+    requireExportable(req.viewer);
+    const job = exportManager.enqueue({
+      format, source: liveSource(), signature: liveSignature(format),
+      requesterId: req.viewer.playerId ?? null, force: req.viewer.kind === "admin" && !!force,
+    });
+    res.json({ jobId: job.id, job: jobView(job) });
+  });
+  // Take archives stream straight from the take files; nothing is written to disk.
+  app.get("/exports/takes.zip", authenticated(), async (req, res) => {
+    requireExportable(req.viewer);
+    const lines = store.pack.lines.map(line => ({ line, take: store.data.lineTakes[line.id]?.status === "accepted" ? { ...store.data.lineTakes[line.id], path: store.takePath(store.data.lineTakes[line.id]) } : null }));
+    await streamZip(res, "open-dub-takes.zip", zipEntries({ title: store.pack.metadata.title ?? "Open Dub", lines, players: new Map(store.data.players.map(player => [player.id, player])) }));
+  });
+  app.get("/exports/mine.zip", authenticated("player"), async (req, res) => {
+    requireExportable(req.viewer);
+    const lines = store.pack.lines.map(line => {
+      const take = store.data.lineTakes[line.id];
+      const mine = take?.status === "accepted" && (take.recorder?.id ?? take.playerId) === req.viewer.playerId;
+      return { line, take: mine ? { ...take, path: store.takePath(take) } : null };
+    });
+    if (!lines.some(entry => entry.take)) fail("You have no accepted takes", 404);
+    await streamZip(res, "open-dub-my-takes.zip", zipEntries({ title: store.pack.metadata.title ?? "Open Dub", lines, players: new Map(store.data.players.map(player => [player.id, player])) }));
+  });
+  app.get("/exports/:id", authenticated(), async (req, res) => {
+    if (!/^[A-Za-z0-9_-]{8,80}$/.test(req.params.id)) fail("Unknown export", 404);
+    const job = exportManager.get(req.params.id);
+    if (!job || job.status !== "ready" || !job.file) fail("Unknown export", 404);
+    if (req.viewer.kind !== "admin" && (!store.exportAllowedForPlayers() || job.source.kind !== "live" || job.source.matchId !== store.data.matchId)) fail("This export is not shared with you", 403);
+    res.type(EXPORT_FORMATS[job.format].mime);
+    res.download(job.file, jobView(job).filename);
+  });
+  // Compatibility: the original blocking export. It always renders fresh, then returns the link.
   app.post("/api/admin/export", authenticated("admin"), async (req, res) => {
     const { matchId } = validateBody(req, { matchId: "string" });
     store.requireMatch(matchId);
-    if (!store.pack || !["review", "playback"].includes(store.data.state)) fail("Finish review before exporting the video", 409);
-    const exportingMatchId = matchId;
-    const acceptedTakes = store.pack.lines.flatMap(line => {
-      const take = store.data.lineTakes[line.id];
-      return take?.status === "accepted" ? [{ take: { ...take, path: store.takePath(take) }, line }] : [];
-    });
-    const result = await exportDub(store.pack, dataDir, ffmpegPath, acceptedTakes);
-    if (store.data.matchId !== exportingMatchId) {
-      await fs.rm(result.output, { force: true });
-      fail("Match changed while the video was exporting", 409);
-    }
-    exports.set(result.id, result.output);
-    while (exports.size > 5) {
-      const oldest = exports.keys().next().value;
-      exports.delete(oldest);
-      await fs.rm(path.join(exportDirectory, oldest + ".mp4"), { force: true });
-    }
-    res.json({ url: "/api/admin/exports/" + result.id, filename: "open-dub-" + result.id + ".mp4" });
+    requireExportable(req.viewer);
+    const job = exportManager.enqueue({ format: "mp4", source: liveSource(), signature: liveSignature("mp4") + ":legacy:" + randomId(6), requesterId: null, force: true });
+    await job.done;
+    if (job.status === "failed") fail(job.error, job.errorStatus ?? 422);
+    res.json({ url: "/api/admin/exports/" + job.id, filename: "open-dub-" + job.id + ".mp4" });
   });
   app.get("/api/admin/exports/:id", authenticated("admin"), async (req, res) => {
     if (!/^[A-Za-z0-9_-]{8,80}$/.test(req.params.id)) fail("Unknown export", 404);
-    const filename = exports.get(req.params.id);
-    if (!filename) fail("Unknown export", 404);
-    res.type("video/mp4");
-    res.sendFile(filename);
+    const job = exportManager.get(req.params.id);
+    if (!job || job.status !== "ready") fail("Unknown export", 404);
+    res.type(EXPORT_FORMATS[job.format].mime);
+    res.sendFile(job.file);
   });
   app.post("/api/admin/retake", authenticated("admin"), async (req, res) => {
     const { lineId, matchId } = validateBody(req, { lineId: "string", matchId: "string" });
@@ -636,6 +686,79 @@ export async function createRuntime(options = {}) {
     res.type(take.mime);
     res.sendFile(store.takePath(take));
   });
+  // ------------------------------------------------------------ library
+  // Admin always; players only when the host turned on libraryVisibleToPlayers.
+  const libraryViewer = (req, res, next) => {
+    if (!library.enabled) return next(Object.assign(new Error("The library is turned off"), { status: 404 }));
+    if (req.viewer.kind !== "admin" && !store.data.options.libraryVisibleToPlayers) return next(Object.assign(new Error("The library is not shared with players"), { status: 403 }));
+    next();
+  };
+  const entryId = req => { if (!/^[A-Za-z0-9_-]{8,64}$/.test(req.params.id) || !library.has(req.params.id)) fail("Unknown library entry", 404); return req.params.id; };
+  // The pack must still be installed and identical for a replay.
+  async function replayInfo(manifest) {
+    const pack = store.packs.get(manifest.pack.id);
+    if (!pack) return { replayable: false, reason: "Pack missing: install it again to replay this dub" };
+    if (await packFingerprint(pack) !== manifest.pack.fingerprint) return { replayable: false, reason: "The installed pack differs from the one used for this dub" };
+    return { replayable: true };
+  }
+  app.get("/api/library", authenticated(), libraryViewer, (req, res) => {
+    const entries = library.list().filter(entry => req.viewer.kind === "admin" || !entry.damaged);
+    res.json({ enabled: true, entries });
+  });
+  app.get("/api/library/:id", authenticated(), libraryViewer, async (req, res) => {
+    const manifest = library.get(entryId(req));
+    if (!manifest) fail("This library entry is damaged", 409);
+    const base = "/library-media/" + manifest.id + "/";
+    const lines = manifest.lines.map(line => ({ ...line, take: line.take ? { ...line.take, url: base + line.take.file } : null }));
+    const files = await Promise.all(["export.mp4", "export.m4a"].map(async file => [file, !!(await library.resolveFile(manifest.id, file))]));
+    res.json({ ...manifest, lines, thumbUrl: manifest.hasThumb ? base + "thumb.jpg" : null, exports: Object.fromEntries(files), replay: { ...(await replayInfo(manifest)), videoUrl: base + "video", backingTrackUrl: base + "backing" } });
+  });
+  app.patch("/api/library/:id", authenticated("admin"), libraryViewer, async (req, res) => {
+    const body = validateBody(req, { title: "string?", starred: "boolean?" });
+    const manifest = await library.patch(entryId(req), body);
+    if (!manifest) fail("This library entry is damaged", 409);
+    res.json(library.summary(manifest.id, library.entries.get(manifest.id)));
+  });
+  app.delete("/api/library/:id", authenticated("admin"), libraryViewer, async (req, res) => {
+    await library.remove(entryId(req));
+    res.json({ ok: true });
+  });
+  app.post("/api/library/:id/export", authenticated("admin"), libraryViewer, async (req, res) => {
+    const { format } = validateBody(req, { format: "string" });
+    if (!Object.hasOwn(EXPORT_FORMATS, format)) fail("Unknown export format");
+    const manifest = library.get(entryId(req));
+    if (!manifest) fail("This library entry is damaged", 409);
+    const file = "export." + EXPORT_FORMATS[format].extension;
+    // A render made from the same takes is reused: the library drops it when takes change.
+    if (await library.resolveFile(manifest.id, file)) return res.json({ ready: true, url: "/library-media/" + manifest.id + "/" + file });
+    const info = await replayInfo(manifest);
+    if (!info.replayable) fail(info.reason, 409);
+    const job = exportManager.enqueue({ format, source: { kind: "library", entryId: manifest.id }, signature: `lib:${manifest.id}:${format}:${manifest.updatedAt}`, requesterId: null });
+    res.json({ ready: false, jobId: job.id });
+  });
+  app.get("/library-media/:id/:file", authenticated(), libraryViewer, async (req, res) => {
+    const manifest = library.get(entryId(req));
+    if (!manifest) fail("Unknown library file", 404);
+    if (req.params.file === "takes.zip") {
+      const players = new Map(manifest.players.map(player => [player.id, player]));
+      const lines = await Promise.all(manifest.lines.map(async line => ({ line, take: line.take ? { ...line.take, path: (await library.resolveFile(manifest.id, line.take.file))?.path } : null })));
+      return streamZip(res, "open-dub-takes.zip", zipEntries({ title: manifest.title, lines: lines.map(entry => ({ line: entry.line, take: entry.take?.path ? entry.take : null })), players }));
+    }
+    if (req.params.file === "video" || req.params.file === "backing") {
+      // Pack media is served from the installed pack only while it still matches this entry.
+      const info = await replayInfo(manifest);
+      if (!info.replayable) fail(info.reason, 409);
+      const pack = store.packs.get(manifest.pack.id);
+      const asset = req.params.file === "video" ? pack.assets[pack.videoUrl.split("/").pop()] : pack.assets[pack.backingTrackUrl.split("/").pop()];
+      if (!asset) fail("Unknown library file", 404);
+      res.type(asset.type);
+      return res.sendFile(await fs.realpath(asset.path), { dotfiles: "allow" });
+    }
+    const file = await library.resolveFile(manifest.id, req.params.file);
+    if (!file) fail("Unknown library file", 404);
+    res.type(file.type);
+    res.sendFile(file.path); // Range requests are handled by sendFile.
+  });
   app.use("/api", (req, res) => res.status(404).json({ error: "Unknown API route" }));
   app.use((req, res, next) => {
     let requested;
@@ -726,6 +849,7 @@ export async function createRuntime(options = {}) {
         await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       }
       await store.pending;
+      await library.flush();
     },
   };
 }
