@@ -295,7 +295,8 @@ The options combine. For example, `caption + reference` gives an improv round, a
 - A host retake after the reveal makes all lines blind again until the host reveals again.
 - The live match's library entry is hidden from players until the reveal.
 - Players do get a per-line `blind` flag (and `captionHidden` / `referenceHidden`), because the recorder has to show "???" and a BLIND badge. The host additionally gets the `blindLines` map.
-- **Not done:** the "what was written" subtitle toggle in final playback (playback has no subtitles today), and the eye-slash icon (blind lines show a text BLIND tag in the host's lists instead).
+- **No "listen to the original" anywhere in blind mode.** The reveal screen lists the written caption and the player's take only. Instead, final playback has an **ORIGINAL SUBTITLES** button (shown only when the match had blind lines, off by default, per device) that shows the written line live while the dub plays, timed by each line's start and end. It shows what the line was meant to say, not a transcript of the take.
+- **Not done:** the eye-slash icon (blind lines show a text BLIND tag in the host's lists instead).
 
 ---
 

@@ -134,7 +134,6 @@ function renderReveal(snapshot, visible) {
     item.append(head, node('p', line.caption, 'caption'));
     const players = node('div', undefined, 'reveal-audio');
     const add = (label, url) => { const wrap = node('label', label); const audio = node('audio'); audio.controls = true; audio.preload = 'none'; audio.src = url; wrap.append(audio); players.append(wrap); };
-    if (line.referenceAudio) add('Original', line.referenceAudio);
     if (take) add('The take', take.url);
     item.append(players); list.append(item);
   }

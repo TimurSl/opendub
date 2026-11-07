@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { audioWindow, speakerAt, DubPlayback } from '../web/playback/playback.js';
+import { audioWindow, speakerAt, captionAt, hasBlindLines, DubPlayback } from '../web/playback/playback.js';
 
 function close(actual, expected) {
   assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} != ${expected}`);
@@ -99,7 +99,8 @@ function playerHarness(t, { fetcher, initialContextState = 'suspended', player =
 
 test('player viewer exposes one accessible control and preloads quietly before audio is unlocked', async (t) => {
   const { playback, root, fetched, state } = playerHarness(t);
-  assert.deepEqual(root.children.map(child => child.tagName), ['video', 'div', 'div', 'p']); // video, speaker badge (not a control), actions, status
+  assert.deepEqual(root.children.map(child => child.tagName), ['video', 'div', 'div', 'div', 'p']); // video, speaker badge, subtitle tools (hidden unless blind), actions, status
+  assert.equal(playback.subtitleTools.hidden, true, 'no blind lines: no subtitle toggle');
   assert.equal(playback.actions.children.length, 1);
   assert.equal(playback.playButton.textContent, 'PLAY');
   assert.equal(playback.playButton.attributes['aria-pressed'], 'false');
@@ -242,4 +243,40 @@ test('speakerAt names the recorder captured at accept time, preferring the lates
   assert.equal(speakerAt(session, 6), null);
   session.lineTakes.b.status = 'recorded';
   assert.equal(speakerAt(session, 3.5).character, 'Alice');
+});
+
+test('captionAt gives the written line for the current time, and only blind matches offer the toggle', () => {
+  const session = { pack: { lines: [
+    { id: 'a', character: 'Alice', caption: 'Hello there', startTime: 1, endTime: 4, blind: { caption: true } },
+    { id: 'b', character: 'Bob', caption: 'Over you', startTime: 3, endTime: 5 },
+    { id: 'c', character: 'Cara', caption: '', startTime: 6, endTime: 7 },
+  ] } };
+  assert.equal(captionAt(session, 0.5), null);
+  assert.deepEqual(captionAt(session, 2), { caption: 'Hello there', character: 'Alice' });
+  assert.equal(captionAt(session, 3.5).character, 'Bob', 'latest start wins on overlap');
+  assert.equal(captionAt(session, 6.5), null, 'empty captions show nothing');
+  assert.equal(captionAt(session, 9), null);
+  assert.equal(hasBlindLines(session), true);
+  assert.equal(hasBlindLines({ pack: { lines: [{ id: 'x' }] } }), false);
+  assert.equal(hasBlindLines({ pack: { lines: [] }, blindLines: { x: {} } }), true, 'the host sees the map instead of per-line flags');
+});
+
+test('ORIGINAL SUBTITLES toggles live captions during playback and only appears for blind matches', (t) => {
+  const { playback, state } = playerHarness(t);
+  const withBlind = (id = null) => { const base = state({ takeId: 'voice-one', playbackId: id }); base.session.pack.lines[0] = { ...base.session.pack.lines[0], character: 'Alice', caption: 'Written line', blind: { caption: true } }; return base; };
+  playback.setState(withBlind());
+  assert.equal(playback.subtitleTools.hidden, false);
+  assert.equal(playback.subtitleButton.textContent, 'ORIGINAL SUBTITLES');
+  playback.showSubtitle(3);
+  assert.equal(playback.subtitleLine.hidden, true, 'off by default');
+  playback.subtitleButton.dispatchEvent(new Event('click'));
+  assert.equal(playback.subtitleButton.attributes['aria-pressed'], 'true');
+  playback.showSubtitle(3);
+  assert.equal(playback.subtitleLine.hidden, false);
+  assert.equal(playback.subtitleLine.textContent, 'Alice: Written line');
+  playback.showSubtitle(10);
+  assert.equal(playback.subtitleLine.hidden, true, 'nothing between lines');
+  playback.showSubtitle(3);
+  playback.subtitleButton.dispatchEvent(new Event('click'));
+  assert.equal(playback.subtitleLine.hidden, true, 'turning it off clears the caption');
 });
