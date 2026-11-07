@@ -18,8 +18,8 @@ Each section builds on the current architecture in [DESIGN.md](DESIGN.md): one i
 | 1 | §1 Avatars and colors | **Done** |
 | 2 | §0.1 rules (take limit, retakes), §2 Library, §3 Export jobs | **Done**, with the gaps listed in each section |
 | 3 | §0.2 redaction, §0.3 reveal, §4 Blind lines | **Done**, with the gaps listed in §4 |
-| 4 | §5 modes: duet, relay, speed, mystery | Not started |
-| 5 | §0.4 server effects, §6 Cards (data-driven decks, batch add in the admin panel) | Not started |
+| 4 | §5 modes: duet, relay, speed, mystery | **Done**, with the deviations listed in §5 |
+| 5 | §0.4 server effects, §6 Cards (data-driven decks, batch add in the admin panel) | **Done**, with the deviations listed in §6 |
 | 6 | §5 swap (rounds) | Not started |
 
 Deviations from the plan are noted in each section as they are implemented.
@@ -302,6 +302,8 @@ The options combine. For example, `caption + reference` gives an improv round, a
 
 ## 5. Match modes
 
+> **Shipped (phase 4).** Deviations: `speed` and `mystery` are rule flags (`rules.speed`, `rules.mystery`), not entries of `rules.mode`; `rules.mode` is `character | line | duet | relay`. Duet and relay compile through the existing **deal-lines** action during assignment (previewable and editable with `assign-line`) instead of at `startRecording()`. Speed: the clock is the time limit plus the line's length plus 3 s of upload allowance, started by `POST /api/player/open-line`; the server enforces one take, no retakes and the deadline, and the player's screen accepts the take right after it is saved. A line whose clock ran out stays missing until the host retakes (reopens) it. Mystery needs a line-based mode and hides characters, owners, assignment tables and recorder badges from other players until the reveal; players cannot download exports before the reveal. **Not built:** host-picked duet pairs (pairing is automatic) and `swap` (phase 6).
+
 **Goal:** more variety without rewriting ownership. Every mode **compiles to `lineAssignments`** at `startRecording()`. `ownerForLine` stays the single source of truth, and only Character mode keeps its live role mapping.
 
 | Mode | How lines are owned | Extra rules |
@@ -337,9 +339,15 @@ The options combine. For example, `caption + reference` gives an improv round, a
 
 ---
 
+## Also shipped: pack grid and pack votes
+
+Not in the original plan. The host's pack chooser (step 1) is a **grid** of the packs downloaded from the Workshop. While the host is choosing, players see the same packs on their own screens and **vote** for the one they want to dub (`POST /api/player/pack-vote`, party-level, one vote each; picking another pack moves the vote). The host sees each voter's avatar and name on the pack, and packs with more votes move to the top of the grid (`rankPacks` in `web/shared/clips.js`, also used for the players' list). Votes are cleared when the host chooses a pack. Pack icons are served to party members at `GET /api/packs/:id/icon`.
+
 ## 6. Handicaps and cards
 
 **Goal:** each player gets a secret challenge, and the group guesses or laughs at the reveal.
+
+> **Shipped (phase 5).** Deviations: **no default deck is shipped** (the store starts with one empty deck, `server/data/default-cards.json` does not exist, and there is no "restore default deck"); cards are added one at a time or in batches (JSON, or `Title | Text` lines) from the **Cards** menu. Guessing covers `per-player` deals only; `per-line` and `per-character` cards turn face up at the reveal. Cards stay face down during guessing until the host presses **Close guessing and show the cards** (or starts the final playback). Dealing happens through `POST /api/admin/cards/deal` during assignment, and automatically when recording starts. The library manifest keeps `cards` (cards played, holders, vetoes, guesses, scores).
 
 ### Card model
 

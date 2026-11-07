@@ -1191,6 +1191,8 @@ export class LineRecorder {
             if (!take || take.status !== 'recorded' || take.playerId !== this.client.state?.viewer.playerId) return null;
             this.savedTake = take; this.savedBlob = blob; this.observedCandidateId = take.id;
             if (!['original', 'my-take', 'accepting', 'settling'].includes(this.mode)) this.status.textContent = 'Take ready';
+            // Speed rounds accept a take the moment it is saved.
+            if (!this.retakeId) queueMicrotask(() => this.onSaved?.(take));
             return take;
           } catch (error) {
             if (generation !== this.generation || !this.allowed || this.paused || this.blob !== blob) return null;

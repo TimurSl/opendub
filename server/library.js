@@ -3,6 +3,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { randomId } from "./session/store.js";
+import { cardsSummary } from "./session/deal.js";
 
 // The dub library: every finished match is saved under <data>/library/<entryId>/.
 // It is the one deliberate exception to "a restart clears recordings": the live
@@ -43,6 +44,7 @@ export function validateManifest(manifest, expectedId) {
       files.add(take.file);
     }
   }
+  if (manifest.cards != null && !plain(manifest.cards)) bad("cards");
   if (typeof manifest.starred !== "boolean") bad("starred");
   return manifest;
 }
@@ -133,11 +135,12 @@ export class Library {
     const accepted = pack.lines.map(line => [line, data.lineTakes[line.id]]).filter(([, take]) => take?.status === "accepted");
     if (!accepted.length) return Promise.resolve(null);
     const players = data.players.map(player => ({ id: player.id, nickname: player.nickname, color: player.color, avatar: player.avatar ?? null }));
-    const signature = JSON.stringify([pack.id, accepted.map(([line, take]) => [line.id, take.id, take.recorder ?? null]), players, data.rules]);
+    const cards = cardsSummary(data);
+    const signature = JSON.stringify([pack.id, accepted.map(([line, take]) => [line.id, take.id, take.recorder ?? null]), players, data.rules, cards]);
     if (this.signatures.get(matchId) === signature) return Promise.resolve(this.byMatch.get(matchId) ?? null);
     // Snapshot everything the save needs now: the live data is mutated by later commits.
     const job = {
-      matchId, signature, rules: structuredClone(data.rules), players,
+      matchId, signature, rules: structuredClone(data.rules), players, cards,
       pack, lines: pack.lines.map(line => ({ line, take: data.lineTakes[line.id]?.status === "accepted" ? { ...data.lineTakes[line.id], path: takePath(data.lineTakes[line.id]) } : null })),
     };
     return this.serial(() => this.save(job));
@@ -174,7 +177,7 @@ export class Library {
       id, version: MANIFEST_VERSION, createdAt: existing?.createdAt ?? now, updatedAt: now,
       title: existing?.title ?? `${pack.metadata.title || "Untitled"} · ${date}`.slice(0, MAX_TITLE),
       pack: { id: pack.id, title: String(pack.metadata.title ?? ""), language: String(pack.metadata.language ?? ""), fingerprint: await packFingerprint(pack) },
-      rules: job.rules, players: job.players, lines, cards: null, awards: null,
+      rules: job.rules, players: job.players, lines, cards: job.cards, awards: null,
       starred: existing?.starred ?? false, incomplete: lines.some(line => !line.take), hasThumb: existing?.hasThumb ?? false,
     }, id);
     await this.writeManifest(id, manifest);

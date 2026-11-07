@@ -11,7 +11,7 @@
   <header>
     <div class="topbar">
       <div class="brand">Open Dub <small>Host studio</small></div>
-      <span class="topbar-actions"><button id="library-toggle" type="button" class="secondary" aria-expanded="false" aria-controls="library-panel" hidden>Library</button><span id="connection" class="connection" role="status">Host studio</span></span>
+      <span class="topbar-actions"><button id="cards-toggle" type="button" class="secondary" aria-expanded="false" aria-controls="cards-panel" hidden>Cards</button><button id="library-toggle" type="button" class="secondary" aria-expanded="false" aria-controls="library-panel" hidden>Library</button><span id="connection" class="connection" role="status">Host studio</span></span>
     </div>
   </header>
   <main>
@@ -22,6 +22,77 @@
       <form id="login-form">
         <div class="field"><label for="admin-token">Admin token</label><input id="admin-token" type="password" autocomplete="off" spellcheck="false" required></div>
         <button id="login-button">Open studio</button>
+      </form>
+    </section>
+    <section id="cards-panel" class="panel cards-panel" hidden aria-labelledby="cards-title">
+      <div class="section-heading"><div><p class="eyebrow">CARDS</p><h2 id="cards-title">Challenge cards</h2><p class="muted">Secret challenges you can deal to players. Nothing is included: add your own, one at a time or many at once.</p></div></div>
+      <div class="deck-bar">
+        <label for="deck-select">Deck<select id="deck-select"></select></label>
+        <div class="actions">
+          <button id="deck-new" type="button" class="secondary">New deck</button>
+          <button id="deck-rename" type="button" class="secondary">Rename</button>
+          <button id="deck-export" type="button" class="secondary">Export JSON</button>
+          <button id="deck-delete" type="button" class="danger">Delete deck</button>
+        </div>
+      </div>
+      <p id="cards-ffmpeg" class="notice" hidden>FFmpeg was not found on the server, so effect cards cannot be used until it is installed.</p>
+      <div class="tabs" role="tablist" aria-label="Card tools">
+        <button id="cards-tab-list-button" type="button" role="tab" aria-selected="true" aria-controls="cards-tab-list" data-tab="list">Cards <span id="cards-count" class="chip-count">0</span></button>
+        <button id="cards-tab-add-button" type="button" role="tab" aria-selected="false" aria-controls="cards-tab-add" data-tab="add">Add one card</button>
+        <button id="cards-tab-batch-button" type="button" role="tab" aria-selected="false" aria-controls="cards-tab-batch" data-tab="batch">Batch add</button>
+      </div>
+      <div id="cards-tab-list" role="tabpanel" aria-labelledby="cards-tab-list-button">
+        <div class="card-filters">
+          <label for="card-search">Search<input id="card-search" type="search" autocomplete="off" placeholder="Title or text"></label>
+          <label for="card-kind-filter">Kind<select id="card-kind-filter"><option value="">All kinds</option><option value="performance">Performance</option><option value="effect">Effect</option><option value="constraint">Constraint</option></select></label>
+        </div>
+        <div id="card-list" class="card-list"></div>
+        <p id="card-list-empty" class="muted" hidden></p>
+      </div>
+      <form id="card-form" class="card-form" role="tabpanel" aria-labelledby="cards-tab-add-button" hidden>
+        <h3 id="card-form-title">Add a card</h3>
+        <div class="field"><label for="card-title">Title</label><input id="card-title" maxlength="60" required placeholder="Whisper everything"></div>
+        <div class="field"><label for="card-text">What the player sees</label><textarea id="card-text" maxlength="280" rows="3" placeholder="Say every line in a whisper, like a secret"></textarea></div>
+        <div class="card-form-row">
+          <label for="card-kind">Kind<select id="card-kind"><option value="performance">Performance: honour system</option><option value="effect">Effect: server changes the voice</option><option value="constraint">Constraint: server enforces a rule</option></select></label>
+          <label for="card-weight">Weight<input id="card-weight" type="number" min="1" max="20" step="1" value="1"><small class="help">Higher weight is dealt more often.</small></label>
+          <label class="inline-check" for="card-enabled"><input id="card-enabled" type="checkbox" checked> Can be dealt</label>
+        </div>
+        <div id="card-effect-fields" class="card-kind-fields" hidden>
+          <label for="card-chain">Audio filter chain</label>
+          <input id="card-chain" maxlength="256" spellcheck="false" autocomplete="off" placeholder="-af acrusher=bits=6:mix=0.8,highpass=f=250">
+          <p class="help">Applied on the server to every take the player records. Allowed: volume, highpass, lowpass, atempo, vibrato, tremolo, acrusher, aecho (same rules as the Custom voice effect). The server rejects anything else.</p>
+        </div>
+        <fieldset id="card-constraint-fields" class="card-kind-fields" hidden>
+          <legend>Rules for this player</legend>
+          <label class="inline-check" for="card-c-caption"><input id="card-c-caption" type="checkbox"> Hide the caption</label>
+          <label class="inline-check" for="card-c-reference"><input id="card-c-reference" type="checkbox"> Hide the original audio</label>
+          <label class="inline-check" for="card-c-scene"><input id="card-c-scene" type="checkbox"> Hide the scene</label>
+          <label for="card-c-takes">Take limit<input id="card-c-takes" type="number" min="0" max="20" step="1" value="0"><small class="help">0 means no extra limit.</small></label>
+        </fieldset>
+        <p id="card-form-status" class="help" role="status" aria-live="polite"></p>
+        <div class="actions"><button id="card-save" type="submit">Add card</button><button id="card-cancel" type="button" class="secondary" hidden>Cancel editing</button></div>
+      </form>
+      <form id="batch-form" class="card-form" role="tabpanel" aria-labelledby="cards-tab-batch-button" hidden>
+        <h3>Add many cards at once</h3>
+        <div class="card-form-row">
+          <label for="batch-format">Format<select id="batch-format"><option value="text">Text: one card per line, “Title | Text”</option><option value="json">JSON: an array of cards</option></select></label>
+          <label for="batch-target">Add to<select id="batch-target"></select></label>
+          <label id="batch-new-wrap" for="batch-new-name" hidden>New deck name<input id="batch-new-name" maxlength="60" placeholder="Pirates"></label>
+        </div>
+        <div class="field"><label for="batch-content">Paste your cards</label><textarea id="batch-content" rows="9" spellcheck="false" placeholder="Whisper everything | Say every line in a whisper&#10;You are a pirate | Arr! Pirate accent, all the way"></textarea></div>
+        <div class="actions"><label class="button-link secondary" for="batch-file">Load a .json or .txt file</label><input id="batch-file" type="file" accept=".json,.txt,.csv,.tsv,text/plain,application/json" hidden><button id="batch-preview" type="button">Preview</button></div>
+        <details class="batch-help"><summary>Format help</summary>
+          <p class="help"><strong>Text:</strong> one performance card per line, <code>Title | Text</code>. A tab works instead of the bar, so you can paste from a spreadsheet. Blank lines and lines starting with <code>#</code> are skipped.</p>
+          <p class="help"><strong>JSON:</strong> an array, or a deck export (<code>{"name": "…", "cards": […]}</code>). Each card can have <code>title</code>, <code>text</code>, <code>kind</code> (performance, effect, constraint), <code>weight</code> (1–20), <code>enabled</code>, and for effect cards <code>effect: {"chain": "-af …"}</code>, for constraint cards <code>constraint: {"blind": {"caption": true}, "noReference": true, "takeLimit": 1}</code>.</p>
+          <p class="help">Up to 200 cards per import. Nothing is saved until you press Import.</p>
+        </details>
+        <div id="batch-preview-box" class="batch-preview" hidden>
+          <p id="batch-summary" role="status" aria-live="polite"></p>
+          <ol id="batch-rows" class="batch-rows"></ol>
+          <div class="actions"><button id="batch-import" type="button">Import</button></div>
+        </div>
+        <p id="batch-status" class="help" role="status" aria-live="polite"></p>
       </form>
     </section>
     <section id="library-panel" class="panel library-panel" hidden aria-labelledby="library-title">
@@ -80,7 +151,7 @@
           <p class="muted">A party gives you an invitation link. Players can join right away and stay for every match you run tonight; you pick the pack afterwards.</p>
           <button id="create-party" type="button">Create party</button>
         </div>
-        <div id="pack-heading" class="section-heading" hidden><div><h2>Choose a pack</h2><p class="muted">Pick the scene to dub in the next match.</p></div><div class="heading-actions"><button id="back-to-setup" class="secondary" type="button" hidden>Back to setup</button><button id="refresh-packs" class="secondary" type="button">Refresh packs</button></div></div>
+        <div id="pack-heading" class="section-heading" hidden><div><h2>Choose a pack</h2><p class="muted">Pick the scene to dub in the next match. Packs players voted for are shown first.</p></div><div class="heading-actions"><button id="back-to-setup" class="secondary" type="button" hidden>Back to setup</button><button id="refresh-packs" class="secondary" type="button">Refresh packs</button></div></div>
         <details id="workshop-panel" class="workshop-panel" hidden>
           <summary>Download a pack from Steam Workshop</summary>
           <form id="workshop-form">
@@ -106,8 +177,9 @@
         <form id="settings-form" class="settings-grid">
           <div class="setting setting-wide">
             <span><strong><label for="game-mode" class="inline-label">Game mode</label></strong><small id="game-mode-help">Each character belongs to one player, who records all of that character's lines.</small></span>
-            <select id="game-mode"><option value="character">Character mode</option><option value="line">Line mode</option></select>
+            <select id="game-mode"><option value="character">Character mode</option><option value="line">Line mode</option><option value="duet">Duet mode</option><option value="relay">Relay mode</option></select>
           </div>
+          <label id="setting-relay-every" class="setting setting-number" hidden><span><strong>Relay hand-over</strong><small>A character passes to the next player every this many lines.</small></span><input id="relay-every" type="number" min="1" max="20" step="1" value="3"></label>
           <label id="setting-free-role-picking" class="setting"><input id="free-role-picking" type="checkbox"><span><strong>Players choose their roles</strong><small>Players can claim free characters themselves.</small></span></label>
           <label id="setting-multiple-roles" class="setting"><input id="multiple-roles" type="checkbox"><span><strong>Allow multiple roles</strong><small>One player may take more than one character.</small></span></label>
           <label id="setting-max-roles" class="setting setting-number"><span><strong>Maximum roles per player</strong><small>0 means no limit. Needs “Allow multiple roles”.</small></span><input id="max-roles" type="number" min="0" step="1" value="0"></label>
@@ -118,6 +190,22 @@
           <label class="setting"><input id="compact-mobile" type="checkbox"><span><strong>Compact controls on phones</strong><small>Use a tighter recording layout on small screens.</small></span></label>
           <label class="setting setting-number"><span><strong>Take limit per line</strong><small>0 means unlimited. 1 gives each line a single take.</small></span><input id="take-limit" type="number" min="0" max="20" step="1" value="0"></label>
           <label class="setting"><input id="allow-retakes" type="checkbox" checked><span><strong>Players may retake</strong><small>Off: only you can request retakes.</small></span></label>
+          <fieldset class="setting-group speed-settings"><legend>Speed round <small class="muted">One take per line, no retakes, and the clock is the server's.</small></legend>
+            <label class="setting"><input id="speed-enabled" type="checkbox"><span><strong>Speed round</strong><small>Players press START on a line, then must record it before time runs out. The take is accepted automatically.</small></span></label>
+            <label class="setting setting-number"><span><strong>Seconds to answer</strong><small>On top of the line's own length.</small></span><input id="speed-seconds" type="number" min="3" max="60" step="1" value="10"></label>
+          </fieldset>
+          <fieldset class="setting-group mystery-settings"><legend>Mystery <small class="muted">Who plays what stays hidden until you reveal it.</small></legend>
+            <label id="setting-mystery" class="setting"><input id="mystery" type="checkbox"><span><strong>Hide characters and players</strong><small>Players see only their own lines' characters. Needs Line, Duet or Relay mode.</small></span></label>
+          </fieldset>
+          <fieldset class="setting-group cards-settings"><legend>Cards <small class="muted">Each player gets a secret challenge. <button id="open-cards-from-setup" type="button" class="link-button">Manage cards</button></small></legend>
+            <label class="setting"><input id="cards-enabled" type="checkbox"><span><strong>Deal challenge cards</strong><small id="cards-enabled-help">Cards are dealt when you open role selection, or when recording starts.</small></span></label>
+            <label class="setting setting-number cards-select"><span><strong>Deck</strong><small id="cards-deck-help"></small></span><select id="cards-deck"></select></label>
+            <label class="setting setting-number cards-select"><span><strong>Deal</strong><small>One card per player, per line, or per character.</small></span><select id="cards-deal"><option value="per-player">Per player</option><option value="per-line">Per line</option><option value="per-character">Per character (Character mode)</option></select></label>
+            <div class="setting cards-kinds"><span><strong>Kinds in play</strong><small>Performance cards need nothing; the others need FFmpeg or rules.</small>
+              <label class="inline-check" for="cards-kind-performance"><input id="cards-kind-performance" type="checkbox" checked> Performance</label>
+              <label class="inline-check" for="cards-kind-effect"><input id="cards-kind-effect" type="checkbox" checked> Effect</label>
+              <label class="inline-check" for="cards-kind-constraint"><input id="cards-kind-constraint" type="checkbox" checked> Constraint</label></span></div>
+          </fieldset>
           <fieldset class="setting-group blind-settings"><legend>Blind lines <small class="muted">Players record without full information; you reveal it afterwards.</small></legend>
             <label class="setting"><input id="blind-caption" type="checkbox"><span><strong>Hide the caption</strong><small>Players see “???” and the character name.</small></span></label>
             <label class="setting"><input id="blind-reference" type="checkbox"><span><strong>Hide the original</strong><small>No ORIGINAL button or waveform.</small></span></label>
@@ -138,7 +226,7 @@
             </div>
             <div id="line-assignment" hidden>
               <div class="section-heading"><div><p class="eyebrow">LINE ASSIGNMENT</p><h2>Recording tasks</h2><p id="line-assignment-summary" class="muted"></p></div><button id="deal-lines" type="button">Deal lines</button></div>
-              <p class="help">Deal shuffles every line among the players connected right now. Adjust individual lines afterwards if needed.</p>
+              <p id="deal-help" class="help">Deal shuffles every line among the players connected right now. Adjust individual lines afterwards if needed.</p>
               <div id="line-assignments" class="role-list"></div>
             </div>
             <div class="actions space-top roles-actions">
@@ -147,6 +235,7 @@
               <button id="unlock-roles" type="button" class="secondary" hidden>Unlock roles</button>
             </div>
             <p id="roles-hint" class="help action-hint" role="status"></p>
+            <div id="cards-overview" class="cards-overview" hidden></div>
           </section>
           <section class="panel">
             <div class="section-heading"><div><p class="eyebrow">READY CHECK</p><h2>Players</h2></div><span id="role-player-count" class="count"></span></div>
@@ -167,6 +256,7 @@
           </details>
           <p id="active-retakes" class="notice" role="status" hidden></p>
         </section>
+        <section id="recording-cards" class="panel cards-overview" hidden></section>
         <section id="character-reassignment" class="panel">
           <div class="section-heading"><div><h2>Reassign characters</h2><p class="muted">If someone leaves, give their characters to another player. Accepted takes are kept; unfinished lines move.</p></div><button id="recording-balance" class="secondary" type="button">Balance free roles</button></div>
           <div id="recording-roles" class="role-list"></div>
@@ -199,6 +289,7 @@
         </section>
         <section class="panel actions action-bar">
           <button id="reveal-blind" type="button" hidden>Reveal blind lines</button>
+          <button id="show-cards" type="button" hidden>Close guessing and show the cards</button>
           <button id="review-playback" type="button">Start final playback</button>
           <button id="accept-all" type="button" class="secondary">Accept all recorded takes</button>
           <button id="continue-recording" type="button" class="secondary">Continue recording</button>

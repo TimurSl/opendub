@@ -2,10 +2,13 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { defaultRules, validateRules, blindActive } from "./rules.js";
+import { defaultRules, validateRules, blindActive, isLineStyle } from "./rules.js";
 import { redactFor, hiddenReferenceAssets } from "./redact.js";
+import { compileAssignments } from "./modes.js";
+import { dealTo, drawCards, keyFor, parseKey, shortlistFor, scoreGuesses, cardFields } from "./deal.js";
 import { COLOR_IDS, MARKERS, isAvatarId, isColorId } from "../../web/shared/identity-data.js";
 
+const shuffledIds = ids => { const copy = [...ids]; for (let index = copy.length - 1; index > 0; index--) { const target = Math.floor(Math.random() * (index + 1)); [copy[index], copy[target]] = [copy[target], copy[index]]; } return copy; };
 export function randomId(bytes = 18) { return randomBytes(bytes).toString("base64url"); }
 export function fail(message, status = 400) { const error = new Error(message); error.status = status; throw error; }
 export function validNickname(nickname) {
@@ -13,6 +16,10 @@ export function validNickname(nickname) {
   return nickname.trim();
 }
 const record = value => Object.assign(Object.create(null), value);
+// Per-match state added by the later roadmap phases. Cleared whenever a match starts or ends.
+const MATCH_RECORDS = ["packVotes", "lineClocks", "cardGuesses"];
+const SPEED_GRACE_MS = 3000;
+const matchExtras = () => ({ cards: null, cardsOpen: false, ...Object.fromEntries(MATCH_RECORDS.map(key => [key, record({})])) });
 const publicPack = pack => pack ? ({
   id: pack.id, metadata: pack.metadata, videoUrl: pack.videoUrl, backingTrackUrl: pack.backingTrackUrl,
   iconUrl: pack.iconUrl, characters: pack.characters, characterLineCounts: pack.characterLineCounts, lines: pack.lines,
@@ -45,6 +52,7 @@ export class SessionStore extends EventEmitter {
       },
       lineTakes: record({}), replacementTakes: record({}), activeRetakes: record({}),
       lineAssignments: record({}), lineVersions: record({}), takeCounts: record({}), blindLines: record({}), revealed: false, recordingStarted: false, playback: null, playbackSeen: false, pausedFrom: null,
+      ...matchExtras(),
     };
   }
   async init() {
@@ -86,7 +94,7 @@ export class SessionStore extends EventEmitter {
       } catch (error) {
         this.data = oldData;
         this.data.roleAssignments = record(this.data.roleAssignments);
-        for (const key of ["roleAssignments", "lineAssignments", "readyPlayers", "lineTakes", "replacementTakes", "activeRetakes", "lineVersions", "takeCounts", "blindLines"]) {
+        for (const key of ["roleAssignments", "lineAssignments", "readyPlayers", "lineTakes", "replacementTakes", "activeRetakes", "lineVersions", "takeCounts", "blindLines", ...MATCH_RECORDS]) {
           this.data[key] = record(this.data[key] ?? {});
         }
         this.pack = oldPack;
@@ -113,9 +121,11 @@ export class SessionStore extends EventEmitter {
   }
   ownerForLine(lineId) {
     const line = this.line(lineId);
-    if (this.data.options.gameMode === "line") return this.data.lineAssignments[lineId] || null;
+    if (this.lineStyle()) return this.data.lineAssignments[lineId] || null;
     return this.data.roleAssignments[line.character] || null;
   }
+  // Line, Duet and Relay keep ownership per line; only Character mode keeps the live role mapping.
+  lineStyle() { return isLineStyle(this.data.options.gameMode); }
   assignedLines(playerId) {
     return this.pack?.lines.filter(line => this.ownerForLine(line.id) === playerId).map(line => line.id) ?? [];
   }
@@ -125,14 +135,20 @@ export class SessionStore extends EventEmitter {
     const entry = this.data.takeCounts[lineId];
     return entry && entry.version === (this.data.lineVersions[lineId] ?? 0) ? entry.count : 0;
   }
+  // The match limit, tightened by the line's active constraint card (0 means unlimited).
+  takeLimitFor(lineId) {
+    const limits = [this.data.rules.takeLimit, this.activeCard(lineId)?.constraint?.takeLimit ?? 0].filter(limit => limit > 0);
+    return limits.length ? Math.min(...limits) : 0;
+  }
   takeLimitReached(lineId) {
-    const limit = this.data.rules.takeLimit;
+    const limit = this.takeLimitFor(lineId);
     return limit > 0 && this.takeCount(lineId) >= limit;
   }
   takesUsed(viewer) {
     const used = record({});
-    if (!this.pack || !this.data.rules.takeLimit) return used;
+    if (!this.pack) return used;
     for (const line of this.pack.lines) {
+      if (!this.takeLimitFor(line.id)) continue;
       if (viewer.kind === "player" && this.ownerForLine(line.id) !== viewer.playerId) continue;
       const count = this.takeCount(line.id);
       if (count) used[line.id] = count;
@@ -144,14 +160,32 @@ export class SessionStore extends EventEmitter {
     const access = this.data.options.exportAccess;
     return access === "players" || (access === "players-after-playback" && this.data.playbackSeen);
   }
-  // Secret rules (blind lines, later cards) are in play and nothing has been revealed yet.
-  secretsActive() { return Object.keys(this.data.blindLines).length > 0 && !this.data.revealed; }
+  // Secret rules (blind lines, mystery, dealt cards) are in play and nothing has been revealed yet.
+  hasSecrets() { return Object.keys(this.data.blindLines).length > 0 || this.data.rules.mystery || this.cardCount() > 0; }
+  secretsActive() { return this.hasSecrets() && !this.data.revealed; }
+  // Dealt cards that are not face up yet (guessing is still open, or the reveal has not happened).
+  cardsHidden() { return this.cardCount() > 0 && !this.data.cardsOpen; }
   hiddenAssetIds() { return hiddenReferenceAssets(this.pack, this.data.blindLines, this.data.revealed); }
   // Picks which lines are blind once per match, so the selection is stable across snapshots and
   // restarts of recording. Seeded shuffle: a reproducible choice for a given seed.
   pickBlindLines() {
+    if (!this.pack) return;
+    this.pickRuleBlindLines();
+    this.applyCardBlindLines();
+  }
+  // Constraint cards hide the caption, original or scene of their holder's lines (OR-ed into the blind set).
+  applyCardBlindLines() {
+    if (!this.data.cards) return;
+    for (const line of this.pack.lines) {
+      const blind = this.activeCard(line.id)?.constraint?.blind;
+      if (!blind) continue;
+      const current = this.data.blindLines[line.id] ?? { caption: false, reference: false, scene: false };
+      this.data.blindLines[line.id] = { caption: current.caption || !!blind.caption, reference: current.reference || !!blind.reference, scene: current.scene || !!blind.scene };
+    }
+  }
+  pickRuleBlindLines() {
     const blind = this.data.rules.blind;
-    if (!blindActive(blind) || Object.keys(this.data.blindLines).length || !this.pack) return;
+    if (!blindActive(blind) || Object.keys(this.data.blindLines).length) return;
     let seed = randomBytes(4).readUInt32LE();
     const random = () => { seed = (seed + 0x6d2b79f5) >>> 0; let t = seed; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
     const ids = this.pack.lines.map(line => line.id);
@@ -185,6 +219,8 @@ export class SessionStore extends EventEmitter {
     const lineTakes = record({});
     for (const [lineId, take] of Object.entries(this.data.lineTakes)) {
       lineTakes[lineId] = { id: take.id, playerId: take.playerId, character: take.character, startTime: take.startTime, endTime: take.endTime, status: take.status, url: "/takes/" + take.id, leadIn: take.leadIn || 0, tail: take.tail || 0, recorder: take.recorder ?? null };
+      // Which card shaped a take is part of the secret until the reveal.
+      if (viewer.kind === "admin" || this.data.cardsOpen) lineTakes[lineId].card = take.card ?? null;
     }
     const replacementTakes = record({});
     if (viewer.kind === "player") for (const [lineId, take] of Object.entries(this.data.replacementTakes)) {
@@ -206,16 +242,20 @@ export class SessionStore extends EventEmitter {
       activeRetakes,
       completedLineCount: Object.values(lineTakes).filter(take => take.status === "accepted").length,
       totalLineCount: this.pack?.lines.length ?? 0, playback: this.data.playback,
-      settings: { ...this.settings, ...this.data.options },
+      settings: { ...this.settings, ...this.data.options, assignmentStyle: this.lineStyle() ? "line" : "character" },
       rules: this.data.rules,
       takesUsed: this.takesUsed(viewer),
+      packChoices: this.packChoices(),
+      packVotes: this.packVotesView(viewer),
+      lineClocks: this.clocksView(viewer),
+      cards: this.cardsView(viewer),
       exports: this.exportsView ? this.exportsView(viewer) : [],
       exportsAllowed: viewer.kind === "admin" || this.exportAllowedForPlayers(),
     };
     if (viewer.kind === "admin") session.joinToken = this.data.partyCreated ? this.data.joinToken : null;
     session.revealed = this.data.revealed;
     session.secretsActive = this.secretsActive();
-    const visible = redactFor(viewer, session, { blindLines: this.data.blindLines, revealed: this.data.revealed });
+    const visible = redactFor(viewer, session, { blindLines: this.data.blindLines, revealed: this.data.revealed, mystery: this.data.rules.mystery });
     return { type: "state", serverId: this.serverId, revision: this.revision, serverTime: Date.now(), viewer, session: visible, queue: viewer.kind === "player" ? this.queue(viewer.playerId) : null };
   }
   createParty() {
@@ -249,6 +289,7 @@ export class SessionStore extends EventEmitter {
     this.data.playback = null;
     this.data.playbackSeen = false;
     this.data.pausedFrom = null;
+    Object.assign(this.data, matchExtras());
     if (this.data.options.maxRolesPerPlayer > 0) {
       this.data.options.maxRolesPerPlayer = Math.min(this.data.options.maxRolesPerPlayer, pack.characters.length);
     }
@@ -276,6 +317,7 @@ export class SessionStore extends EventEmitter {
     this.data.playback = null;
     this.data.playbackSeen = false;
     this.data.pausedFrom = null;
+    Object.assign(this.data, matchExtras());
   }
   requireMatch(matchId) {
     if (!this.data.matchId || matchId !== this.data.matchId) fail("Match changed. Refresh and try again.", 409);
@@ -399,23 +441,21 @@ export class SessionStore extends EventEmitter {
     }
     this.completionPhase();
   }
+  // Line mode shuffles and deals; Duet and Relay compile their table (server/session/modes.js). The
+  // host sees the result during assignment and can still move single lines with assign-line.
   dealLines() {
-    if (this.data.options.gameMode !== "line") fail("Line dealing is unavailable in Character mode", 409);
+    if (!this.lineStyle()) fail("Line dealing is unavailable in Character mode", 409);
     if (this.data.state !== "assignment" || this.data.recordingStarted) fail("Lines can only be dealt before recording", 409);
-    const players = this.data.players.filter(player => (this.connections.get(player.id) ?? 0) > 0);
+    const players = this.data.players.filter(player => (this.connections.get(player.id) ?? 0) > 0).map(player => player.id);
     if (!players.length) fail("At least one connected player is required to deal lines", 409);
-    const tasks = [...this.pack.lines];
-    for (let index = tasks.length - 1; index > 0; index--) {
-      const target = Math.floor(Math.random() * (index + 1));
-      [tasks[index], tasks[target]] = [tasks[target], tasks[index]];
-    }
-    this.data.lineAssignments = record({});
-    tasks.forEach((line, index) => { this.data.lineAssignments[line.id] = players[index % players.length].id; });
+    const mode = this.data.options.gameMode;
+    const ordered = mode === "line" ? players : shuffledIds(players);
+    this.data.lineAssignments = record(compileAssignments(mode, this.pack, ordered, { relayEvery: this.data.rules.relayEvery }));
     this.data.readyPlayers = record({});
     this.data.rolesLocked = false;
   }
   assignLine(lineId, playerId) {
-    if (this.data.options.gameMode !== "line") fail("Line assignment is unavailable in Character mode", 409);
+    if (!this.lineStyle()) fail("Line assignment is unavailable in Character mode", 409);
     const line = this.line(lineId);
     if (this.data.state === "lobby" || this.data.state === "playback") fail("Lines cannot be reassigned now", 409);
     if (playerId && !this.findPlayer(playerId)) fail("Unknown player", 404);
@@ -442,11 +482,11 @@ export class SessionStore extends EventEmitter {
   }
   canLockRoles() {
     if (!this.pack) return false;
-    if (this.data.options.gameMode === "line") return this.pack.lines.every(line => this.findPlayer(this.data.lineAssignments[line.id]));
+    if (this.lineStyle()) return this.pack.lines.every(line => this.findPlayer(this.data.lineAssignments[line.id]));
     return this.pack.characters.every(character => this.findPlayer(this.data.roleAssignments[character]));
   }
   maybeLockRoles() {
-    const participating = this.data.players.filter(player => this.data.options.gameMode === "line"
+    const participating = this.data.players.filter(player => this.lineStyle()
       ? this.assignedLines(player.id).length > 0
       : this.assignedCharacters(player.id).length > 0);
     const ready = participating.length > 0 && participating.every(player => this.data.readyPlayers[player.id]);
@@ -494,20 +534,21 @@ export class SessionStore extends EventEmitter {
   setPlayerReady(playerId, ready) {
     if (!this.findPlayer(playerId)) fail("Unknown player", 404);
     if (this.data.state !== "assignment" || this.data.rolesLocked) fail("Role selection is locked", 409);
-    if (ready && !(this.data.options.gameMode === "line" ? this.assignedLines(playerId).length : this.assignedCharacters(playerId).length)) fail(this.data.options.gameMode === "line" ? "You have no assigned lines" : "Choose at least one character first", 409);
+    if (ready && !(this.lineStyle() ? this.assignedLines(playerId).length : this.assignedCharacters(playerId).length)) fail(this.lineStyle() ? "You have no assigned lines" : "Choose at least one character first", 409);
     if (ready) this.data.readyPlayers[playerId] = true;
     else delete this.data.readyPlayers[playerId];
     this.maybeLockRoles();
   }
   lockRoles() {
     if (this.data.state !== "assignment") fail("Role selection is not open", 409);
-    if (!this.canLockRoles()) fail(this.data.options.gameMode === "line" ? "Assign every line before locking assignments" : "Assign every character before locking roles", 409);
+    if (!this.canLockRoles()) fail(this.lineStyle() ? "Assign every line before locking assignments" : "Assign every character before locking roles", 409);
     this.data.rolesLocked = true;
   }
   reopenRoles() {
     if (!["assignment", "recording", "review", "reveal", "paused"].includes(this.data.state)) fail("Role selection cannot be reopened now", 409);
     this.data.state = "assignment";
     this.data.revealed = false; // blind lines are blind again if recording restarts
+    this.data.cardsOpen = false;
     this.cancelAllRetakes();
     this.data.rolesLocked = false;
     this.data.readyPlayers = record({});
@@ -544,7 +585,8 @@ export class SessionStore extends EventEmitter {
     if (!this.pack) fail("Select a pack first", 409);
     if (this.data.state === "playback") fail("Stop playback first", 409);
     if (this.data.state === "lobby") fail("Open the lobby first", 409);
-    if (!this.canLockRoles()) fail(this.data.options.gameMode === "line" ? "Assign every line before recording" : "Assign every character before recording", 409);
+    if (!this.canLockRoles()) fail(this.lineStyle() ? "Assign every line before recording" : "Assign every character before recording", 409);
+    this.ensureCards();
     this.pickBlindLines();
     this.data.rolesLocked = true;
     this.data.recordingStarted = true;
@@ -570,9 +612,11 @@ export class SessionStore extends EventEmitter {
   // The reveal step sits between review and playback. It unredacts blind captions and reference audio.
   openReveal() {
     if (!["recording", "review"].includes(this.data.state)) fail("Reveal is available from review", 409);
-    if (!Object.keys(this.data.blindLines).length) fail("There is nothing to reveal in this match", 409);
+    if (!this.hasSecrets()) fail("There is nothing to reveal in this match", 409);
     if (this.hasActiveRetakes()) fail("Players are finishing retakes", 409);
     this.data.revealed = true;
+    // Per-player cards stay face down while everyone guesses; other deals have nothing to guess.
+    this.data.cardsOpen = !this.data.cards || this.data.cards.deal !== "per-player";
     this.data.state = "reveal";
     this.data.pausedFrom = null;
   }
@@ -630,7 +674,9 @@ export class SessionStore extends EventEmitter {
     this.requireMatch(matchId);
     const line = this.requireOwner(playerId, lineId);
     if ((this.data.lineVersions[lineId] ?? 0) !== lineVersion) fail("Line changed during upload; retry", 409);
+    this.checkSpeedClock(playerId, lineId, lineVersion);
     const existing = this.data.lineTakes[lineId];
+    const card = this.activeCard(lineId)?.id ?? null;
     if (this.takeLimitReached(lineId)) fail("Take limit reached for this line. Ask the host for a retake", 409);
     let take;
     if (retakeId) {
@@ -639,13 +685,13 @@ export class SessionStore extends EventEmitter {
       if (existing?.status !== "accepted" || existing.id !== active.acceptedTakeId) fail("Accepted take changed during upload", 409);
       const current = this.data.replacementTakes[lineId];
       if ((current?.id ?? null) !== previousTakeId) fail("Replacement changed during upload; retry", 409);
-      take = { id, playerId, matchId, retakeId, lineId, lineVersion, acceptedTakeId: active.acceptedTakeId, character: line.character, startTime: line.startTime, endTime: line.endTime, status: "recorded", mime, size, leadIn, tail };
+      take = { id, playerId, matchId, retakeId, lineId, lineVersion, acceptedTakeId: active.acceptedTakeId, character: line.character, startTime: line.startTime, endTime: line.endTime, status: "recorded", mime, size, leadIn, tail, card };
       this.data.replacementTakes[lineId] = take;
     } else {
       if (existing?.status === "accepted") fail("Accepted take requires an active replacement retake", 409);
       if (this.data.activeRetakes[lineId]) fail("Include the active retake ID", 409);
       if ((existing?.id ?? null) !== previousTakeId) fail("Take changed during upload; retry", 409);
-      take = { id, playerId, matchId, character: line.character, startTime: line.startTime, endTime: line.endTime, status: "recorded", mime, size, leadIn, tail };
+      take = { id, playerId, matchId, character: line.character, startTime: line.startTime, endTime: line.endTime, status: "recorded", mime, size, leadIn, tail, card };
       this.data.lineTakes[lineId] = take;
     }
     this.data.takeCounts[lineId] = { version: lineVersion, count: this.takeCount(lineId) + 1 };
@@ -688,8 +734,10 @@ export class SessionStore extends EventEmitter {
     if (["recording", "review", "reveal"].includes(this.data.state)) {
       // A re-recorded line is blind again: the reveal is undone until the host repeats it.
       this.data.revealed = false;
+      this.data.cardsOpen = false;
       this.data.state = "recording";
     }
+    delete this.data.lineClocks[lineId];
     return previous;
   }
   startPlayback(allowMissing) {
@@ -698,6 +746,7 @@ export class SessionStore extends EventEmitter {
     if (this.secretsActive()) fail("Reveal the blind lines before final playback", 409);
     if (!this.allComplete() && !allowMissing) fail("Required lines are missing accepted takes", 409);
     if (this.hasActiveRetakes()) fail("Players are finishing retakes", 409);
+    this.data.cardsOpen = true; // guessing closes when the dub starts
     this.data.state = "playback";
     this.data.playback = { id: randomId(), startsAt: Date.now() + 5000 };
     this.data.playbackSeen = true;
@@ -706,6 +755,173 @@ export class SessionStore extends EventEmitter {
     if (this.data.state !== "playback") fail("Playback has not started", 409);
     this.data.playback = null;
     this.data.state = "review";
+  }
+  // ------------------------------------------------------------ speed rounds
+  // The server owns the clock. A player opens a line explicitly; the take must arrive before the
+  // deadline (the time limit, plus the line's own length and a short upload allowance).
+  openLine(playerId, lineId) {
+    const speed = this.data.rules.speed;
+    if (!speed.enabled) fail("Speed rounds are off in this match", 409);
+    const line = this.requireOwner(playerId, lineId);
+    if (this.data.lineTakes[lineId]?.status === "accepted") fail("This line is already accepted", 409);
+    const version = this.data.lineVersions[lineId] ?? 0;
+    const current = this.data.lineClocks[lineId];
+    if (current && current.playerId === playerId && current.version === version) return current;
+    const openedAt = Date.now();
+    this.data.lineClocks[lineId] = { playerId, version, openedAt, deadline: openedAt + (speed.lineTimeLimitSec + line.duration) * 1000 + SPEED_GRACE_MS };
+    return this.data.lineClocks[lineId];
+  }
+  checkSpeedClock(playerId, lineId, version) {
+    if (!this.data.rules.speed.enabled) return;
+    const clock = this.data.lineClocks[lineId];
+    if (!clock || clock.playerId !== playerId || clock.version !== version) fail("Press START before recording this line", 409);
+    if (Date.now() > clock.deadline) fail("Time is up for this line. Ask the host to reopen it", 409);
+  }
+  clocksView(viewer) {
+    const view = record({});
+    if (!this.data.rules.speed.enabled) return view;
+    for (const [lineId, clock] of Object.entries(this.data.lineClocks)) {
+      if (clock.version !== (this.data.lineVersions[lineId] ?? 0)) continue;
+      if (viewer.kind === "player" && clock.playerId !== viewer.playerId) continue;
+      view[lineId] = { openedAt: clock.openedAt, deadline: clock.deadline, ...(viewer.kind === "admin" ? { playerId: clock.playerId } : {}) };
+    }
+    return view;
+  }
+  // ------------------------------------------------------------ pack votes
+  // While the host is choosing, players see the installed packs and vote for the one they want to dub.
+  // One vote each (picking another pack moves it). Votes are cleared when a pack is chosen.
+  packChoices() {
+    if (!this.data.partyCreated || this.data.state !== "lobby") return [];
+    return [...this.packs.values()].map(pack => ({
+      id: pack.id, title: pack.metadata.title || pack.id, authors: pack.metadata.authors ?? [], language: pack.metadata.language ?? "",
+      lineCount: pack.lines.length, characters: pack.characters, characterLineCounts: pack.characterLineCounts, hasIcon: !!pack.icon,
+    }));
+  }
+  setPackVote(playerId, packId, vote) {
+    if (!this.findPlayer(playerId)) fail("Unknown player", 404);
+    if (typeof vote !== "boolean") fail("Invalid vote");
+    if (!this.data.partyCreated || this.data.state !== "lobby") fail("Votes are open while the host is choosing a pack", 409);
+    if (!this.packs.has(packId)) fail("Unknown pack", 404);
+    for (const [id, voters] of Object.entries(this.data.packVotes)) {
+      const rest = voters.filter(voter => voter !== playerId);
+      if (rest.length) this.data.packVotes[id] = rest; else delete this.data.packVotes[id];
+    }
+    if (vote) this.data.packVotes[packId] = [...(this.data.packVotes[packId] ?? []), playerId];
+  }
+  packVotesView(viewer) {
+    const view = record({});
+    for (const [packId, voters] of Object.entries(this.data.packVotes)) {
+      const known = voters.filter(id => this.findPlayer(id));
+      if (!known.length || !this.packs.has(packId)) continue;
+      view[packId] = { count: known.length, mine: viewer.kind === "player" && known.includes(viewer.playerId), voters: known };
+    }
+    return view;
+  }
+  // ------------------------------------------------------------ cards
+  cardCount() { return this.data.cards ? Object.keys(this.data.cards.holders).length : 0; }
+  cardKeys() {
+    const { deal } = this.data.rules.cards;
+    if (deal === "per-line") return this.pack.lines.map(line => keyFor.line(line.id));
+    if (deal === "per-character") return this.pack.characters.map(keyFor.character);
+    return this.data.players.map(player => keyFor.player(player.id));
+  }
+  cardKeyFor(lineId) {
+    const deal = this.data.cards?.deal;
+    if (deal === "per-line") return keyFor.line(lineId);
+    if (deal === "per-character") return keyFor.character(this.line(lineId).character);
+    const owner = this.ownerForLine(lineId);
+    return owner ? keyFor.player(owner) : null;
+  }
+  // The card in force for a line: dealt to whoever owns it, and not vetoed.
+  activeCard(lineId) {
+    const cards = this.data.cards;
+    if (!cards) return null;
+    const key = this.cardKeyFor(lineId);
+    if (!key || cards.vetoed[key]) return null;
+    return cards.cards[cards.holders[key]] ?? null;
+  }
+  effectCardFor(lineId) {
+    const card = this.activeCard(lineId);
+    return card?.kind === "effect" && card.effect ? card : null;
+  }
+  // `fill` keeps what is already dealt and only draws for keys without a card (players who joined later).
+  dealCards({ fill = false } = {}) {
+    const config = this.data.rules.cards;
+    if (!config.enabled) fail("Cards are turned off for this match", 409);
+    if (!this.pack) fail("Select a pack first", 409);
+    if (this.data.state !== "assignment" || this.data.recordingStarted) fail("Cards can only be dealt before recording starts", 409);
+    const pool = this.cardPool?.(config.deckId, config.kinds) ?? [];
+    if (!pool.length) fail("The chosen deck has no enabled cards of the selected kinds. Add some in the Cards menu", 409);
+    this.data.cards = dealTo({ keys: this.cardKeys(), pool, existing: fill ? this.data.cards : null, deal: config.deal, deckId: config.deckId, kinds: config.kinds });
+    if (!fill) { this.data.cardGuesses = record({}); }
+  }
+  ensureCards() {
+    if (this.data.rules.cards.enabled && !this.data.recordingStarted) this.dealCards({ fill: !!this.data.cards });
+  }
+  redealCard(key) {
+    const cards = this.data.cards;
+    if (!cards || !parseKey(key) || !cards.holders[key]) fail("There is no such card to re-deal", 404);
+    if (this.data.recordingStarted) fail("Cards can only be re-dealt before recording starts", 409);
+    const [card] = drawCards(this.cardPool?.(cards.deckId, cards.kinds) ?? [], 1, Math.random, { avoid: new Set(Object.values(cards.holders)) });
+    if (!card) fail("The deck has no card to deal", 409);
+    cards.holders[key] = card.id;
+    cards.cards[card.id] = cardFields(card);
+    for (const id of Object.keys(cards.cards)) if (!Object.values(cards.holders).includes(id)) delete cards.cards[id];
+  }
+  // A vetoed card stops shaping future takes. Accepted takes keep what they got.
+  vetoCard(key, vetoed = true) {
+    const cards = this.data.cards;
+    if (!cards?.holders[key]) fail("There is no such card", 404);
+    if (!this.data.recordingStarted) fail("Cards can be vetoed once recording has started. Before that, re-deal them", 409);
+    if (vetoed) cards.vetoed[key] = true; else delete cards.vetoed[key];
+  }
+  openCards() {
+    if (this.data.state !== "reveal" || !this.data.cards) fail("Cards are shown during the reveal", 409);
+    this.data.cardsOpen = true;
+  }
+  guessCard(playerId, targetPlayerId, cardId) {
+    const cards = this.data.cards;
+    if (this.data.state !== "reveal" || this.data.cardsOpen || !cards || cards.deal !== "per-player") fail("Guessing is not open", 409);
+    if (!this.findPlayer(playerId) || !this.findPlayer(targetPlayerId)) fail("Unknown player", 404);
+    if (playerId === targetPlayerId) fail("You cannot guess your own card", 409);
+    if (!shortlistFor(cards, this.data.matchId, targetPlayerId).includes(cardId)) fail("Pick one of the cards on the list");
+    (this.data.cardGuesses[playerId] ??= {})[targetPlayerId] = cardId;
+  }
+  // Hosts see every card. A player sees only the cards that shape their own lines until the host
+  // turns the cards face up. Effect chains are never sent to players.
+  cardsView(viewer) {
+    const config = this.data.rules.cards; const cards = this.data.cards;
+    const view = { enabled: config.enabled, deal: config.deal, kinds: config.kinds, deckId: config.deckId, dealt: !!cards, open: false, entries: [], cards: {} };
+    if (!config.enabled || !cards) return view;
+    const admin = viewer.kind === "admin";
+    view.open = this.data.cardsOpen;
+    const mine = ({ scope, target }) => scope === "player" ? target === viewer.playerId
+      : scope === "line" ? this.ownerForLine(target) === viewer.playerId
+        : this.data.roleAssignments[target] === viewer.playerId;
+    for (const [key, cardId] of Object.entries(cards.holders)) {
+      const parsed = parseKey(key);
+      if (!parsed || !(admin || this.data.cardsOpen || mine(parsed))) continue;
+      const card = cards.cards[cardId];
+      view.entries.push({ key, ...parsed, cardId, vetoed: !!cards.vetoed[key] });
+      view.cards[cardId] = admin ? card : { id: card.id, title: card.title, text: card.text, kind: card.kind, effect: !!card.effect, constraint: card.constraint };
+    }
+    if (this.data.revealed && cards.deal === "per-player") view.guessing = this.guessingView(viewer);
+    return view;
+  }
+  guessingView(viewer) {
+    const cards = this.data.cards; const brief = ({ id, title, text, kind }) => ({ id, title, text, kind });
+    const shortlists = {}; const options = {};
+    for (const player of this.data.players) {
+      if (player.id === viewer.playerId) continue;
+      const ids = shortlistFor(cards, this.data.matchId, player.id);
+      if (!ids.length) continue;
+      shortlists[player.id] = ids;
+      for (const id of ids) options[id] = brief(cards.cards[id] ?? cards.decoyCards[id]);
+    }
+    const guesses = viewer.kind === "admin" ? this.data.cardGuesses : (this.data.cardGuesses[viewer.playerId] ?? {});
+    const view = { open: !this.data.cardsOpen && this.data.state === "reveal", shortlists, options, guesses };
+    if (this.data.cardsOpen) view.scores = scoreGuesses(cards, this.data.cardGuesses, this.data.players.map(player => player.id));
+    return view;
   }
   async presence(playerId, delta) {
     if (!this.findPlayer(playerId)) return;

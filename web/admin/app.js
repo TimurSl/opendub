@@ -6,6 +6,8 @@ import { currentStage, maxViewableStage, reconcileStage } from './stage.js';
 import { renderPlayerChip } from '../shared/identity.js';
 import { initLibrary } from './library.js';
 import { colorHex } from '../shared/identity-data.js';
+import { initCards, describeCard, cardKindLabel } from './cards.js';
+import { rankPacks } from '../shared/clips.js';
 
 const $ = id => document.getElementById(id);
 const client = new RuntimeClient('admin');
@@ -28,12 +30,26 @@ let selectedRoomId = null; let selectedMatchId = null; let activePackList = [];
 let viewedStage = null; let previousProgressStage = null; let renderedPackListKey = null;
 let copyResetTimer = null;
 
+const DEAL_LABELS = { line: ['Deal lines', 'Deal again'], duet: ['Pair players', 'Pair again'], relay: ['Build relay', 'Build again'] };
+const DEAL_HELP = {
+  line: 'Deal shuffles every line among the players connected right now. Adjust individual lines afterwards if needed.',
+  duet: 'Pairing gives every character two of the players connected right now; that character\'s lines alternate between them. Adjust single lines afterwards if needed.',
+  relay: 'Building the relay hands each character from player to player every few lines, among the players connected right now. Adjust single lines afterwards if needed.',
+};
+const MODE_HELP = {
+  character: 'Each character belongs to one player, who records all of that character\'s lines.',
+  line: 'Every line is dealt to a player on its own, so one character can have several voices. Players with no lines simply wait.',
+  duet: 'Every character gets two players, and that character\'s lines alternate between them. Best with at least twice as many players as characters.',
+  relay: 'A character\'s lines pass from player to player a few at a time, so everyone voices every character a bit.',
+};
 const STAGE_TITLES = ['Choose a pack', 'Set up the match', 'Assign roles', 'Recording', 'Review the takes', 'Final playback'];
 const PHASE_LABELS = { lobby: 'Setting up', assignment: 'Choosing roles', recording: 'Recording', paused: 'Paused', review: 'Reviewing', reveal: 'Revealing', playback: 'Playing' };
 const ASSIGNMENT_CONTAINERS = ['roles', 'recording-roles', 'line-assignments', 'recording-line-assignments', 'review-line-assignments'];
 const plural = (count, word, many = `${word}s`) => `${count} ${count === 1 ? word : many}`;
 const lineNumber = (pack, lineId) => pack.lines.findIndex(line => line.id === lineId) + 1;
 
+// The Library and Cards menus replace the studio while they are open; every render keeps it that way.
+const menuOpen = () => ['library-toggle', 'cards-toggle'].some(id => $(id).getAttribute('aria-expanded') === 'true');
 function render(snapshot) { renderAdmin(snapshot); }
 function rerender() { if (client.state) render(client.state); }
 function beginPending(button, label = 'Working…') {
@@ -42,7 +58,7 @@ function beginPending(button, label = 'Working…') {
 function endPending(button) {
   pendingButtons.finish(button, rerender);
 }
-function showLogin() { $('admin-panel').hidden = true; $('login-panel').hidden = false; $('library-toggle').hidden = true; }
+function showLogin() { $('admin-panel').hidden = true; $('login-panel').hidden = false; $('library-toggle').hidden = true; $('cards-toggle').hidden = true; }
 // `key` de-duplicates repeated clicks. Per-item actions (assigning one
 // character, accepting one take) use their own key so quick changes to two
 // different rows are both sent.
@@ -71,7 +87,7 @@ $('login-form').addEventListener('submit', async event => {
   try {
     await publicLinkReady;
     await client.request('/api/admin/login', { token: $('admin-token').value.trim() });
-    $('admin-token').value = ''; await client.start(); await refreshPacks(); startWorkshopPolling();
+    $('admin-token').value = ''; await client.start(); await refreshPacks(); startWorkshopPolling(); quietly(cards.load());
   } catch (problem) { error(problem); }
   finally { setBusy($('login-button'), false, 'Open studio'); }
 });
@@ -142,6 +158,11 @@ $('copy-join').addEventListener('click', async () => {
 $('join-url').addEventListener('focus', () => $('join-url').select());
 
 // ---------------------------------------------------------------- settings (auto-saved)
+const CARD_KIND_IDS = ['performance', 'effect', 'constraint'];
+function readCardRules() {
+  const kinds = CARD_KIND_IDS.filter(kind => $(`cards-kind-${kind}`).checked);
+  return { enabled: $('cards-enabled').checked, deckId: $('cards-deck').value || null, deal: $('cards-deal').value, kinds: kinds.length ? kinds : [...CARD_KIND_IDS] };
+}
 function readSessionSettings() {
   return {
     gameMode: $('game-mode').value,
@@ -154,7 +175,7 @@ function readSessionSettings() {
     voiceEffectsEnabled: $('effects-enabled').checked,
     compactMobilePreferred: $('compact-mobile').checked,
     exportAccess: $('export-access').value, libraryVisibleToPlayers: $('library-visible').checked,
-    rules: { mode: $('game-mode').value, takeLimit: Number($('take-limit').value || 0), allowPlayerRetakes: $('allow-retakes').checked, blind: { caption: $('blind-caption').checked, reference: $('blind-reference').checked, scene: $('blind-scene').checked, share: Number($('blind-share').value) / 100 } },
+    rules: { mode: $('game-mode').value, takeLimit: Number($('take-limit').value || 0), allowPlayerRetakes: $('allow-retakes').checked, relayEvery: Number($('relay-every').value || 3), speed: { enabled: $('speed-enabled').checked, lineTimeLimitSec: Number($('speed-seconds').value || 10) }, mystery: $('mystery').checked, cards: readCardRules(), blind: { caption: $('blind-caption').checked, reference: $('blind-reference').checked, scene: $('blind-scene').checked, share: Number($('blind-share').value) / 100 } },
   };
 }
 const SETTINGS_HINT = 'Changes save automatically.';
@@ -165,6 +186,18 @@ function saveSettings() {
   if (!Number.isInteger(settings.rules.takeLimit) || settings.rules.takeLimit < 0 || settings.rules.takeLimit > 20) {
     setSettingsMessage('Take limit must be a whole number from 0 to 20.');
     return Promise.reject(new Error('Invalid take limit'));
+  }
+  if (!Number.isInteger(settings.rules.relayEvery) || settings.rules.relayEvery < 1 || settings.rules.relayEvery > 20) {
+    setSettingsMessage('Relay hand-over must be a whole number of lines from 1 to 20.');
+    return Promise.reject(new Error('Invalid relay hand-over'));
+  }
+  if (!Number.isInteger(settings.rules.speed.lineTimeLimitSec) || settings.rules.speed.lineTimeLimitSec < 3 || settings.rules.speed.lineTimeLimitSec > 60) {
+    setSettingsMessage('Seconds to answer must be a whole number from 3 to 60.');
+    return Promise.reject(new Error('Invalid speed limit'));
+  }
+  if (settings.rules.cards.enabled && !CARD_KIND_IDS.some(kind => $(`cards-kind-${kind}`).checked)) {
+    setSettingsMessage('Choose at least one kind of card.');
+    return Promise.reject(new Error('No card kinds'));
   }
   if (!Number.isInteger(settings.maxRolesPerPlayer) || settings.maxRolesPerPlayer < 0) {
     setSettingsMessage('Maximum roles must be a whole number (0 for no limit).');
@@ -189,8 +222,8 @@ $('multiple-roles').addEventListener('change', () => {
   updateMaxRoles();
 });
 $('blind-share').addEventListener('input', () => { $('blind-share-value').textContent = `${$('blind-share').value}%`; });
-$('game-mode').addEventListener('change', () => updateGameModeView($('game-mode').value));
-$('settings-form').addEventListener('change', () => quietly(saveSettings()));
+$('game-mode').addEventListener('change', () => { updateGameModeView($('game-mode').value); });
+$('settings-form').addEventListener('change', () => { updateRuleDependencies(); quietly(saveSettings()); });
 $('open-lobby').addEventListener('click', async () => {
   const button = $('open-lobby');
   if (!beginPending(button, 'Opening…')) return;
@@ -203,7 +236,7 @@ $('fill-unassigned').addEventListener('click', () => quietly(action('fill-unassi
 $('recording-balance').addEventListener('click', () => quietly(action('fill-unassigned', {}, $('recording-balance'))));
 $('deal-lines').addEventListener('click', () => {
   const session = client.state?.session;
-  if (Object.keys(session?.lineAssignments || {}).length && !window.confirm('Deal all lines again? Current line assignments are replaced and players must press READY again.')) return;
+  if (Object.keys(session?.lineAssignments || {}).length && !window.confirm('Build the line assignments again? The current ones are replaced and players must press READY again.')) return;
   quietly(action('deal-lines', {}, $('deal-lines'), 'Dealing…'));
 });
 $('lock-roles').addEventListener('click', () => quietly(action('lock-roles', {}, $('lock-roles'))));
@@ -228,6 +261,7 @@ async function startSharedPlayback(allowMissing, button) {
   finally { endPending(button); }
 }
 $('reveal-blind').addEventListener('click', () => quietly(action('reveal', {}, $('reveal-blind'))));
+$('show-cards').addEventListener('click', () => quietly(action('cards/open', {}, $('show-cards'), 'Opening…')));
 $('review-playback').addEventListener('click', () => startSharedPlayback(false, $('review-playback')));
 $('skip-missing').addEventListener('click', () => {
   const session = client.state?.session; if (!session) return;
@@ -237,7 +271,7 @@ $('skip-missing').addEventListener('click', () => {
 });
 $('restart-playback').addEventListener('click', () => quietly(action('restart-playback', {}, $('restart-playback'))));
 $('stop-playback').addEventListener('click', () => quietly(action('stop-playback', {}, $('stop-playback'))));
-$('line-filter').addEventListener('change', () => { if (client.state) renderTakes(client.state.session); });
+$('line-filter').addEventListener('change', () => { if (client.state) renderClips(client.state.session); });
 function nextMatch(button) {
   if (!window.confirm('Start the next match?\n\nThis match is saved in the library, so you can replay and export it later. Players stay in the party.')) return;
   quietly(action('next-match', {}, button));
@@ -281,7 +315,8 @@ client.addEventListener('connection', event => {
   $('connection').classList.toggle('is-offline', !event.detail);
 });
 const library = initLibrary({ client, quietly, onError: error });
-client.addEventListener('state', event => { render(event.detail); renderExports(event.detail.session); library.update(event.detail); });
+const cards = initCards({ client, quietly, onError: error, onChange: () => { fillDeckSelect(client.state?.session.rules?.cards?.deckId ?? undefined); updateRuleDependencies(); if (client.state) { cardOverviewKeys.clear(); rerender(); cards.update(); library.update(client.state); } } });
+client.addEventListener('state', event => { render(event.detail); renderExports(event.detail.session); library.update(event.detail); cards.update(event.detail); });
 
 // ---------------------------------------------------------------- pack list
 const packFilterKey = 'open-dub-pack-filters';
@@ -316,13 +351,15 @@ function characterSummary(characters, counts) {
 }
 function renderPackList(force = false) {
   const session = client.state?.session;
-  const key = JSON.stringify([session?.partyCreated, session?.state, session?.matchId, session?.pack?.id, pendingActionPaths.has('select'), activePackList.map(pack => pack.id)]);
+  const key = JSON.stringify([session?.partyCreated, session?.state, session?.matchId, session?.pack?.id, pendingActionPaths.has('select'), activePackList.map(pack => pack.id), session?.packVotes, session?.players?.map(player => [player.id, player.nickname, player.color, player.marker, player.avatar])]);
   if (!force && key === renderedPackListKey) return;
   renderedPackListKey = key;
   const container = $('packs'); container.replaceChildren();
   const minimum = filterNumber('pack-min-characters'); const maximum = filterNumber('pack-max-characters');
   const title = $('pack-search').value;
-  const filtered = filterPacks(activePackList, { title, minimum, maximum });
+  // Packs players voted for come first, most votes on top; the rest keep their order.
+  const votes = session?.packVotes || {};
+  const filtered = rankPacks(filterPacks(activePackList, { title, minimum, maximum }), votes).map(item => item.pack);
   $('pack-result-count').textContent = filtered.length === activePackList.length ? plural(activePackList.length, 'pack') : `Showing ${filtered.length} of ${plural(activePackList.length, 'pack')}`;
   $('clear-pack-filters').disabled = !title.trim() && minimum === null && maximum === null;
   if (!activePackList.length) {
@@ -348,6 +385,12 @@ function renderPackList(force = false) {
     const counts = pack.characters.map((character, index) => pack.characterLineCounts?.[index] ?? 0);
     body.append(node('p', `${(metadata.authors || []).join(', ') || 'Unknown authors'} · ${plural(pack.lineCount ?? 0, 'line')} · ${plural(characterCount, 'character')}`, 'muted'));
     body.append(node('p', characterSummary(pack.characters, counts), 'help'));
+    const asked = votes[pack.id];
+    if (asked?.count) {
+      const box = node('div', undefined, 'pack-votes'); box.append(node('span', `${plural(asked.count, 'vote')}`, 'pack-vote-count'));
+      for (const id of asked.voters) { const voter = session.players.find(player => player.id === id); if (voter) box.append(renderPlayerChip(voter, { size: 22 })); }
+      body.append(box); row.classList.add('has-votes');
+    }
     const select = node('button', selecting ? 'Selecting…' : isCurrent ? 'Open setup' : 'Use this pack');
     select.type = 'button';
     if (isCurrent) select.className = 'secondary';
@@ -396,7 +439,7 @@ function showStage(stage, progressStage, maxStage, session) {
   $('stage-heading').textContent = stage === 1 && !session.partyCreated ? 'Start a party' : STAGE_TITLES[stage - 1];
 }
 function lineOwnerId(session, line) {
-  return session.settings.gameMode === 'line' ? session.lineAssignments?.[line.id] : session.roleAssignments[line.character];
+  return session.settings.assignmentStyle === 'line' ? session.lineAssignments?.[line.id] : session.roleAssignments[line.character];
 }
 function nextStepText(session, progressStage) {
   const players = session.players; const pack = session.pack;
@@ -404,14 +447,14 @@ function nextStepText(session, progressStage) {
   if (!pack) return players.length
     ? `${plural(players.length, 'player')} joined. Choose a pack for the next match.`
     : 'Share the invitation link with your players, then choose a pack. Players can join while you choose.';
-  const lineMode = session.settings.gameMode === 'line';
+  const lineMode = session.settings.assignmentStyle === 'line';
   switch (progressStage) {
     case 2: return 'Check the match settings, then press Open role selection.';
     case 3: {
       if (!players.length) return 'Waiting for players. Share the invitation link above.';
       if (lineMode) {
         const unassigned = pack.lines.filter(line => !players.some(player => player.id === session.lineAssignments?.[line.id])).length;
-        if (unassigned) return `${plural(unassigned, 'line')} still need a player. Press Deal lines to share them out.`;
+        if (unassigned) return `${plural(unassigned, 'line')} still need a player. Press ${(DEAL_LABELS[session.settings.gameMode] || DEAL_LABELS.line)[0]} to share them out.`;
       } else {
         const free = pack.characters.filter(character => !session.roleAssignments[character]).length;
         if (free) return `${plural(free, 'character')} still need a player. Pick players in the list${session.settings.autoBalanceSuggestions ? ' or press Balance free roles' : ''}.`;
@@ -429,6 +472,7 @@ function nextStepText(session, progressStage) {
     case 5: {
       const toReview = Object.values(session.lineTakes).filter(take => take.status === 'recorded').length;
       const missing = session.totalLineCount - session.completedLineCount - toReview;
+      if (session.state === 'reveal' && session.cards?.guessing?.open) return 'Players are guessing each other\'s cards. Close guessing when they are done, then start the final playback.';
       if (toReview) return `Listen to ${plural(toReview, 'take')} waiting for review and accept or retake them.`;
       if (missing) return `${plural(missing, 'line')} have no take yet. Continue recording, or play without them.`;
       return 'Every line is accepted. Start the final playback for everyone!';
@@ -440,14 +484,14 @@ function nextStepText(session, progressStage) {
 function renderAdmin(snapshot) {
   if (snapshot.viewer.kind !== 'admin') return;
   const session = snapshot.session; const pack = session.pack;
-  $('login-panel').hidden = true; $('admin-panel').hidden = false;
+  $('login-panel').hidden = true; $('admin-panel').hidden = menuOpen();
   const partyChanged = selectedRoomId !== session.id;
   const matchChanged = selectedMatchId !== session.matchId;
   const progressStage = currentStage(session); const maxStage = maxViewableStage(session);
   viewedStage = reconcileStage(viewedStage, previousProgressStage, progressStage, partyChanged || matchChanged, maxStage);
   previousProgressStage = progressStage;
   if (partyChanged || matchChanged) {
-    roleViews.clear(); takeRows.clear();
+    roleViews.clear(); takeRows.clear(); cardOverviewKeys.clear();
     [...ASSIGNMENT_CONTAINERS, 'takes'].forEach(id => $(id).replaceChildren());
     $('export-status').textContent = ''; settingsMessage = SETTINGS_HINT;
   }
@@ -486,7 +530,7 @@ function renderAdmin(snapshot) {
   $('change-pack').hidden = session.state !== 'lobby';
   $('back-to-setup').hidden = stage !== 1;
   renderSetup(session);
-  const lineMode = session.settings.gameMode === 'line';
+  const lineMode = session.settings.assignmentStyle === 'line';
   const allAssigned = lineMode
     ? pack.lines.every(line => session.players.some(player => player.id === session.lineAssignments?.[line.id]))
     : pack.characters.every(character => session.players.some(player => player.id === session.roleAssignments[character]));
@@ -508,11 +552,41 @@ function renderPacksIfNeeded() {
 
 // ---------------------------------------------------------------- setup screen
 function updateGameModeView(mode) {
-  const lineMode = mode === 'line';
-  $('game-mode-help').textContent = lineMode
-    ? 'Every line is dealt to a player on its own, so one character can have several voices. Players with no lines simply wait.'
-    : 'Each character belongs to one player, who records all of that character\'s lines.';
+  const lineMode = mode !== 'character';
+  $('game-mode-help').textContent = MODE_HELP[mode] || MODE_HELP.character;
   for (const id of ['setting-free-role-picking', 'setting-multiple-roles', 'setting-max-roles', 'setting-auto-balance', 'setting-lock-ready']) $(id).hidden = lineMode;
+  updateRuleDependencies();
+}
+// Settings that only make sense together: speed forces one take and no retakes, mystery needs a line-based
+// mode, per-character cards need Character mode, and card options matter only while cards are on.
+function updateRuleDependencies() {
+  const mode = $('game-mode').value; const editable = client.state?.session.state === 'lobby';
+  $('setting-relay-every').hidden = mode !== 'relay';
+  if (mode === 'character') $('mystery').checked = false;
+  $('mystery').disabled = mode === 'character' || !editable;
+  const perCharacter = $('cards-deal').querySelector('option[value="per-character"]');
+  perCharacter.disabled = mode !== 'character';
+  if (mode !== 'character' && $('cards-deal').value === 'per-character') $('cards-deal').value = 'per-player';
+  const speed = $('speed-enabled').checked;
+  if (speed) { $('take-limit').value = '1'; $('allow-retakes').checked = false; }
+  $('take-limit').disabled = speed || !editable; $('allow-retakes').disabled = speed || !editable; $('speed-seconds').disabled = !speed || !editable;
+  const cardsOn = $('cards-enabled').checked;
+  for (const id of ['cards-deck', 'cards-deal', ...CARD_KIND_IDS.map(kind => `cards-kind-${kind}`)]) $(id).disabled = !cardsOn || !editable;
+  const effectAllowed = cards.data.ffmpeg !== false;
+  $('cards-kind-effect').disabled = $('cards-kind-effect').disabled || !effectAllowed;
+  if (!effectAllowed) $('cards-kind-effect').checked = false;
+}
+// The deck menu in setup lists the host's decks; the saved choice stays selected.
+function fillDeckSelect(chosen) {
+  const select = $('cards-deck'); const decks = cards.data.decks; const wanted = chosen ?? select.value ?? '';
+  const key = JSON.stringify(decks.map(deck => [deck.id, deck.name, deck.cards.length]));
+  if (select.dataset.key !== key) {
+    select.dataset.key = key; select.replaceChildren();
+    for (const deck of decks) { const option = node('option', `${deck.name} (${deck.cards.filter(card => card.enabled).length} cards)`); option.value = deck.id; select.append(option); }
+  }
+  select.value = decks.some(deck => deck.id === wanted) ? wanted : decks[0]?.id ?? '';
+  const chosenDeck = decks.find(deck => deck.id === select.value);
+  $('cards-deck-help').textContent = chosenDeck ? (chosenDeck.cards.some(card => card.enabled) ? '' : 'This deck has no cards that can be dealt yet.') : 'Open Manage cards to create a deck.';
 }
 function renderSetup(session) {
   const pack = session.pack;
@@ -545,11 +619,16 @@ function renderSetup(session) {
       'blind-caption': session.rules?.blind?.caption, 'blind-reference': session.rules?.blind?.reference, 'blind-scene': session.rules?.blind?.scene,
       'blind-share': Math.round((session.rules?.blind?.share ?? 1) * 100),
       'allow-retakes': session.rules?.allowPlayerRetakes ?? true,
+      'relay-every': session.rules?.relayEvery ?? 3, 'speed-enabled': session.rules?.speed?.enabled, 'speed-seconds': session.rules?.speed?.lineTimeLimitSec ?? 10,
+      'mystery': session.rules?.mystery, 'cards-enabled': session.rules?.cards?.enabled, 'cards-deal': session.rules?.cards?.deal ?? 'per-player',
+      'cards-kind-performance': session.rules?.cards?.kinds?.includes('performance') ?? true, 'cards-kind-effect': session.rules?.cards?.kinds?.includes('effect') ?? true, 'cards-kind-constraint': session.rules?.cards?.kinds?.includes('constraint') ?? true,
     };
+    fillDeckSelect(session.rules?.cards?.deckId ?? undefined);
     for (const [id, value] of Object.entries(values)) {
       const input = $(id);
       if (document.activeElement === input) continue;
-      if (id === 'game-mode') input.value = value;
+      if (id === 'game-mode' || id === 'cards-deal') input.value = value;
+      else if (id === 'relay-every' || id === 'speed-seconds') input.value = String(value);
       else if (id === 'take-limit' || id === 'blind-share') { input.value = String(value); if (id === 'blind-share') $('blind-share-value').textContent = `${value}%`; }
       else if (id === 'max-roles') { input.value = String(value ?? 0); input.max = String(pack.characters.length); }
       else input.checked = !!value;
@@ -592,7 +671,9 @@ function renderRoles(session, lineMode, allAssigned) {
   const connected = session.players.some(player => player.connected);
   if (!pendingButtons.has($('deal-lines'))) {
     $('deal-lines').disabled = session.state !== 'assignment' || !!session.recordingStarted || !connected;
-    $('deal-lines').textContent = assignedLines && !session.recordingStarted ? 'Deal again' : 'Deal lines';
+    const labels = DEAL_LABELS[session.settings.gameMode] || DEAL_LABELS.line;
+    $('deal-lines').textContent = assignedLines && !session.recordingStarted ? labels[1] : labels[0];
+    $('deal-help').textContent = DEAL_HELP[session.settings.gameMode] || DEAL_HELP.line;
   }
   const balanceHidden = !session.settings.autoBalanceSuggestions;
   $('fill-unassigned').hidden = $('recording-balance').hidden = balanceHidden;
@@ -612,6 +693,7 @@ function renderRoles(session, lineMode, allAssigned) {
     : session.rolesLocked ? 'Roles are locked: players cannot change them. Starting recording keeps them locked.'
     : 'Starting recording locks the roles. Players who are not ready yet can still record their lines.';
   renderPlayers('players', session);
+  renderCardsOverview('cards-overview', session);
 }
 function fillPlayerOptions(select, session) {
   select.replaceChildren();
@@ -684,6 +766,82 @@ function renderLineAssignmentRows(containerId, session) {
     row.element.hidden = onlyOpen && take?.status === 'accepted';
   }
 }
+// ---------------------------------------------------------------- dealt cards (host overview)
+const cardOverviewKeys = new Map();
+function cardHolder(session, entry) {
+  const wrap = node('span', undefined, 'card-holder');
+  if (entry.scope === 'player') { wrap.append(renderPlayerChip(session.players.find(player => player.id === entry.target) || { nickname: 'Player' }, { size: 22 })); return wrap; }
+  if (entry.scope === 'line') {
+    const index = session.pack.lines.findIndex(line => line.id === entry.target);
+    wrap.append(node('strong', `Line #${index + 1}`), document.createTextNode(` · ${session.pack.lines[index]?.character ?? ''}`));
+    const owner = session.players.find(player => player.id === lineOwnerId(session, session.pack.lines[index] || {}));
+    if (owner) wrap.append(renderPlayerChip(owner, { size: 20 }));
+    return wrap;
+  }
+  wrap.append(node('strong', entry.target));
+  const owner = session.players.find(player => player.id === session.roleAssignments[entry.target]);
+  if (owner) wrap.append(renderPlayerChip(owner, { size: 20 }));
+  return wrap;
+}
+function renderCardsOverview(containerId, session) {
+  const container = $(containerId); const cards = session.cards;
+  const show = !!cards?.enabled && !!session.pack && ['assignment', 'recording', 'paused', 'review', 'reveal', 'playback'].includes(session.state);
+  container.hidden = !show;
+  if (!show) { cardOverviewKeys.delete(containerId); container.replaceChildren(); return; }
+  const key = JSON.stringify([cards, session.state, session.recordingStarted, session.players.map(player => [player.id, player.nickname, player.color, player.marker, player.avatar]), session.lineAssignments, session.roleAssignments]);
+  if (cardOverviewKeys.get(containerId) === key) return;
+  cardOverviewKeys.set(containerId, key); container.replaceChildren();
+  const canDeal = session.state === 'assignment' && !session.recordingStarted;
+  const head = node('div', undefined, 'section-heading'); const title = node('div');
+  const dealtText = cards.dealt ? `${plural(cards.entries.length, 'card')} dealt ${cards.deal === 'per-line' ? 'per line' : cards.deal === 'per-character' ? 'per character' : 'per player'}. Players see only their own until the reveal.` : 'No cards dealt yet. They are dealt automatically when recording starts.';
+  title.append(node('p', 'CHALLENGE CARDS', 'eyebrow'), node('h2', 'Dealt cards'), node('p', dealtText, 'muted')); head.append(title);
+  if (canDeal) {
+    const deal = node('button', cards.dealt ? 'Deal again' : 'Deal cards', cards.dealt ? 'secondary' : ''); deal.type = 'button';
+    deal.addEventListener('click', () => { if (cards.dealt && !window.confirm('Deal every card again? The current cards are replaced.')) return; quietly(action('cards/deal', {}, deal, 'Dealing…', 'cards:deal')); });
+    head.append(deal);
+  }
+  container.append(head);
+  const list = node('div', undefined, 'card-deal-list');
+  for (const entry of cards.entries) {
+    const card = cards.cards[entry.cardId]; if (!card) continue;
+    const row = node('article', undefined, `card-deal-row${entry.vetoed ? ' is-vetoed' : ''}`);
+    const body = node('div', undefined, 'card-deal-body'); const top = node('div', undefined, 'card-item-head');
+    top.append(node('strong', card.title), node('span', cardKindLabel(card.kind), `badge badge-kind-${card.kind}`));
+    if (entry.vetoed) top.append(node('span', 'Vetoed', 'badge badge-missing'));
+    body.append(cardHolder(session, entry), top);
+    if (card.text) body.append(node('p', card.text));
+    const detail = describeCard(card); if (detail) body.append(node('small', detail, 'help'));
+    row.append(body);
+    const actions = node('div', undefined, 'card-item-actions');
+    if (canDeal) {
+      const redeal = node('button', 'Re-deal', 'secondary'); redeal.type = 'button';
+      redeal.addEventListener('click', () => quietly(action('cards/redeal', { key: entry.key }, redeal, 'Dealing…', `redeal:${entry.key}`)));
+      actions.append(redeal);
+    } else if (session.recordingStarted && card.kind !== 'performance' && session.state !== 'playback') {
+      const veto = node('button', entry.vetoed ? 'Restore' : 'Veto', 'secondary'); veto.type = 'button';
+      veto.title = entry.vetoed ? 'Apply this card to new takes again' : 'Stop this card shaping new takes. Accepted takes keep what they got';
+      veto.addEventListener('click', () => quietly(action('cards/veto', { key: entry.key, vetoed: !entry.vetoed }, veto, 'Working…', `veto:${entry.key}`)));
+      actions.append(veto);
+    }
+    row.append(actions); list.append(row);
+  }
+  container.append(list);
+  const guessing = cards.guessing;
+  if (guessing && session.players.length > 1) {
+    const expected = session.players.length * (session.players.length - 1);
+    const made = Object.values(guessing.guesses || {}).reduce((sum, targets) => sum + Object.keys(targets).length, 0);
+    const box = node('div', undefined, 'card-scores');
+    if (guessing.scores) {
+      box.append(node('h3', 'Guessing results'));
+      const table = node('ol', undefined, 'score-list');
+      for (const player of [...session.players].sort((a, b) => (guessing.scores[b.id] ?? 0) - (guessing.scores[a.id] ?? 0))) {
+        const item = node('li'); item.append(renderPlayerChip(player, { size: 22 }), node('strong', String(guessing.scores[player.id] ?? 0))); table.append(item);
+      }
+      box.append(table);
+    } else box.append(node('p', `Guessing is open: ${made} of ${expected} guesses are in.`, 'muted'));
+    container.append(box);
+  }
+}
 function playerStatus(player, session, lineMode) {
   const { totalAssignedLines: total, completedLines: done } = player.progress;
   if (session.state === 'lobby' || session.state === 'assignment') {
@@ -699,7 +857,7 @@ function playerStatus(player, session, lineMode) {
 function renderPlayers(containerId, session) {
   const container = $(containerId); container.replaceChildren();
   if (!session.players.length) { container.append(node('p', 'No players yet. Share the invitation link.', 'muted')); return; }
-  const lineMode = session.settings.gameMode === 'line';
+  const lineMode = session.settings.assignmentStyle === 'line';
   for (const player of session.players) {
     const row = node('article', undefined, 'player-row');
     row.classList.toggle('is-offline', !player.connected);
@@ -732,6 +890,7 @@ function renderRecording(session, lineMode) {
     ? `${stuck.map(player => `${player.nickname} (${plural(player.progress.pendingLines, 'line')} left)`).join(', ')} ${stuck.length === 1 ? 'is' : 'are'} offline. If they don't come back, reassign their ${lineMode ? 'lines' : 'characters'} below.`
     : '';
   renderPlayers('recording-players', session);
+  renderCardsOverview('recording-cards', session);
   renderIncompleteLines(session);
   const activeRetakes = session.activeRetakes || [];
   $('active-retakes').hidden = !activeRetakes.length;
@@ -775,6 +934,11 @@ function renderReview(session) {
   $('accept-all').textContent = `Accept ${toReview > 1 ? `all ${toReview} recorded takes` : 'the recorded take'}`;
   $('continue-recording').hidden = !inReview || accepted >= session.totalLineCount;
   $('reveal-blind').hidden = !secret || !['review', 'recording'].includes(session.state);
+  const onlyBlind = !session.cards?.dealt && !session.rules?.mystery;
+  if (!pendingButtons.has($('reveal-blind'))) $('reveal-blind').textContent = onlyBlind ? 'Reveal blind lines' : 'Reveal everything';
+  const guessingOpen = session.state === 'reveal' && !!session.cards?.guessing?.open;
+  $('show-cards').hidden = !guessingOpen;
+  if (!pendingButtons.has($('show-cards'))) $('show-cards').disabled = !guessingOpen;
   if (!pendingButtons.has($('reveal-blind'))) $('reveal-blind').disabled = activeRetakes.length > 0 || session.state !== 'review';
   $('review-playback').disabled = accepted < session.totalLineCount || !inReview || activeRetakes.length > 0 || secret;
   $('skip-missing').hidden = !inReview || accepted >= session.totalLineCount;
@@ -783,17 +947,34 @@ function renderReview(session) {
   $('next-match-review').hidden = !inReview;
   $('review-hint').textContent = ['recording', 'paused'].includes(session.state)
     ? 'Players are still recording. You can already listen to, accept, or retake uploaded takes here.'
-    : secret && inReview ? 'Blind lines are still hidden from players. Press Reveal blind lines when you are ready; then start the final playback.'
+    : secret && inReview ? 'Some things are still hidden from players. Press Reveal when you are ready; then start the final playback.'
+    : guessingOpen ? 'Players are guessing each other\'s cards. Close guessing to turn the cards face up, or start the final playback, which does the same.'
     : session.state === 'reveal' ? 'Everything is revealed on the players\' screens. Start the final playback when you are ready.'
     : activeRetakes.length ? 'Waiting for a retake to finish before playback can start.'
     : toReview && !missing ? `Accept or retake ${plural(toReview, 'take')} to start the final playback.`
     : toReview || missing ? `${plural(session.totalLineCount - accepted, 'line')} without an accepted take. Accept them, continue recording, or play without them.`
     : '';
-  renderTakes(session);
+  renderClips(session);
 }
-function renderTakes(session) {
-  const pack = session.pack; if (!pack) return;
-  const filter = $('line-filter').value;
+async function askRetake(line, index, button) {
+  const state = client.state?.session; if (!state) return;
+  const owner = state.players.find(player => player.id === lineOwnerId(state, line));
+  if (!window.confirm(`Delete this take of line #${index + 1} (${line.character}) and ask ${owner?.nickname || 'its player'} to record it again?${state.state === 'review' ? '\n\nRecording reopens for this line.' : ''}`)) return;
+  const fromStage = viewedStage ?? currentStage(state);
+  try {
+    await action('retake', { lineId: line.id }, button, 'Deleting…', `retake:${line.id}`);
+    // A retake from Review reopens recording; keep the host on the list
+    // they were working through instead of jumping to the Record screen.
+    if (fromStage === 5 && client.state && maxViewableStage(client.state.session) >= 5) { viewedStage = 5; rerender(); }
+  } catch {}
+}
+const canRetakeLine = (line, take) => !!take || !!client.state?.session.lineClocks?.[line.id];
+function renderClips(session) {
+  if (!session.pack) return;
+  $('takes-empty').hidden = renderTakes(session, $('line-filter').value) > 0;
+}
+function renderTakes(session, filter) {
+  const pack = session.pack;
   let visible = 0;
   for (const [index, line] of pack.lines.entries()) {
     let row = takeRows.get(line.id);
@@ -809,18 +990,7 @@ function renderTakes(session) {
       const accept = node('button', 'Accept'); accept.type = 'button';
       const retake = node('button', 'Ask for retake', 'secondary'); retake.type = 'button';
       accept.addEventListener('click', () => quietly(action('accept', { lineId: line.id }, accept, 'Accepting…', `accept:${line.id}`)));
-      retake.addEventListener('click', async () => {
-        const state = client.state?.session; if (!state) return;
-        const owner = state.players.find(player => player.id === lineOwnerId(state, line));
-        if (!window.confirm(`Delete this take of line #${index + 1} (${line.character}) and ask ${owner?.nickname || 'its player'} to record it again?${state.state === 'review' ? '\n\nRecording reopens for this line.' : ''}`)) return;
-        const fromStage = viewedStage ?? currentStage(state);
-        try {
-          await action('retake', { lineId: line.id }, retake, 'Deleting…', `retake:${line.id}`);
-          // A retake from Review reopens recording; keep the host on the list
-          // they were working through instead of jumping to the Record screen.
-          if (fromStage === 5 && client.state && maxViewableStage(client.state.session) >= 5) { viewedStage = 5; rerender(); }
-        } catch {}
-      });
+      retake.addEventListener('click', () => askRetake(line, index, retake));
       actions.append(accept, retake); element.append(description, audio, placeholder, actions); $('takes').append(element);
       row = { element, title, badge, status, caption, audio, placeholder, accept, retake, takeId: null }; takeRows.set(line.id, row);
     }
@@ -831,7 +1001,7 @@ function renderTakes(session) {
     row.title.textContent = `#${index + 1} · ${line.character}`;
     row.badge.textContent = label; row.badge.className = `badge ${badgeClass}`;
     row.status.textContent = `${owner?.nickname || 'No player assigned'} · ${line.startTime.toFixed(1)}–${line.endTime.toFixed(1)} s`;
-    row.caption.textContent = line.caption;
+    row.caption.textContent = line.caption || (line.captionHidden ? '???' : '');
     if (take?.id !== row.takeId) {
       row.takeId = take?.id; row.audio.pause();
       if (take) row.audio.src = take.url; else { row.audio.removeAttribute('src'); row.audio.load(); }
@@ -840,13 +1010,13 @@ function renderTakes(session) {
     row.accept.hidden = take?.status !== 'recorded';
     if (!pendingButtons.has(row.accept)) row.accept.disabled = !['recording', 'review'].includes(session.state);
     row.element.classList.toggle('is-blind', !!session.blindLines?.[line.id]);
-    row.retake.hidden = !take;
+    row.retake.hidden = !canRetakeLine(line, take); row.retake.textContent = 'Ask for retake';
     if (!pendingButtons.has(row.retake)) row.retake.disabled = session.state === 'playback';
     row.element.dataset.status = status;
     row.element.hidden = filter !== 'all' && status !== filter;
     if (!row.element.hidden) visible++;
   }
-  $('takes-empty').hidden = visible > 0;
+  return visible;
 }
 
 // ---------------------------------------------------------------- playback screen
@@ -857,4 +1027,4 @@ function renderPlaybackScreen(session) {
   if (!pendingButtons.has($('export-video'))) $('export-video').disabled = !['review', 'playback'].includes(session.state);
 }
 
-client.start().then(async () => { await refreshPacks(); startWorkshopPolling(); }).catch(() => { /* Login required outside approved WireGuard networks. */ });
+client.start().then(async () => { await refreshPacks(); startWorkshopPolling(); quietly(cards.load()); }).catch(() => { /* Login required outside approved WireGuard networks. */ });

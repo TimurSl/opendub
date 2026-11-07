@@ -143,6 +143,16 @@ All mutation requests are JSON except multipart take uploads. Errors return `{ "
 | `GET /library-media/:id/:file` | — | Manifest-listed takes, `thumb.jpg`, cached `export.mp4`/`export.m4a`, `takes.zip`, and `video`/`backing` from the installed pack while its fingerprint matches. Range requests supported |
 | `GET /media/:packId/:assetId` | — | Authenticated, selected-pack allowlisted assets; range requests supported |
 | `GET /takes/:takeId` | — | Authenticated accepted take or candidate; a replacement candidate is visible only to its owning player |
+| `POST /api/admin/deal-lines` (modes) | `{matchId}` | In Line mode shuffles and deals; in Duet pairs two players per character and alternates its lines; in Relay hands each character over every `rules.relayEvery` lines. Result is `lineAssignments`, editable with `assign-line` |
+| `POST /api/player/open-line` | `{lineId, matchId}` | Speed rounds: starts the server clock for the caller's line (idempotent); uploads before it or after its deadline answer 409. Clocks appear in `session.lineClocks` |
+| `POST /api/player/pack-vote` | `{packId, vote}` (no `matchId`) | Players vote for the pack to dub while the host is choosing (lobby). One vote each; another pack moves it; `vote: false` withdraws. `session.packChoices` lists the installed packs in the lobby and `session.packVotes` is `{packId: {count, mine, voters}}`; votes are cleared when a pack is selected |
+| `GET /api/packs/:id/icon` | — | Pack icon for any party member (the admin route stays for the host) |
+| `GET /api/admin/cards` | — | `{decks, limits, ffmpeg}`. The deck store (`<data dir>/cards/decks.json`) starts with one empty deck |
+| `POST /api/admin/cards` / `PATCH` / `DELETE /api/admin/cards/:id` | `{deckId, card}` / `{card}` | Add, edit, delete one card (validated by `validateCard`). Not match-scoped |
+| `POST /api/admin/cards/batch` | `{format: 'json' \| 'text', content, deckId \| newDeckName, dryRun?, skipInvalid?}` | Batch add. `dryRun` previews every row; saving is all-or-nothing for the confirmed rows. Up to 200 cards, 400 KB |
+| `POST /api/admin/decks`, `PATCH`/`DELETE /api/admin/decks/:id`, `GET /api/admin/decks/:id/export` | `{name}` | Deck management and JSON export (the same format batch add imports) |
+| `POST /api/admin/cards/deal` / `redeal` / `veto` / `open` | `{matchId}`, `{key}`, `{key, vetoed?}` | Deal cards during assignment, re-deal one before recording, veto one during it, and turn the cards face up after guessing |
+| `POST /api/player/guess` | `{targetPlayerId, cardId, matchId}` | During the reveal, guess another player's card from a shortlist (real card plus decoys); changeable until the cards are opened |
 | `GET /ws` | authenticated upgrade | Full state snapshots, no client gameplay authority |
 
 WebSocket snapshots have this envelope:
@@ -196,6 +206,12 @@ The recording comparison decodes time-domain samples for the original/reference 
 Final playback preloads the backing track and accepted takes, decodes them into Web Audio buffers, and schedules them against a single `AudioContext` clock. The backing starts at timeline zero and each take starts at the Workshop line start. Clip accepted voice duration to the corresponding line window so an overlong take cannot run indefinitely. Overlapping takes mix naturally. The visual video is muted and follows that timeline; seeking/rejoining rebuilds the schedule with offsets. Do not use independent JavaScript timers for each line.
 
 The host broadcasts one future playback epoch. Browsers estimate their offset to the server clock, preload audio, and schedule a common start. Late joiners enter at the elapsed timeline time. Network timing affects when a browser begins watching, never where a take belongs in the dub. This is best-effort shared playback, not sample-perfect synchronization between devices.
+
+## Modes, cards and pack votes
+
+`rules` also holds `relayEvery`, `speed: {enabled, lineTimeLimitSec}`, `mystery` and `cards: {enabled, deckId, deal, kinds}`. Speed forces `takeLimit: 1` and `allowPlayerRetakes: false`. `session.settings.assignmentStyle` is `line` for Line, Duet and Relay (ownership in `lineAssignments`) and `character` otherwise; clients use it instead of `gameMode`.
+
+Cards are copied into `data.cards` when dealt (`{deal, cards, holders, vetoed, decoyCards}`), so deck edits never change a running match. A card's key is `player:<id>`, `line:<id>` or `char:<name>`. Effect cards are applied by the take upload route with the allowlisted filter chain; if FFmpeg fails nothing is stored. Constraint cards add per-line blind flags and tighten the take limit. Players receive only their own cards until `cardsOpen`; effect chains are never sent to players.
 
 ## Redaction and the reveal
 

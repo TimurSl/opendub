@@ -15,6 +15,7 @@
       <h1 id="pack-title">Join the dub</h1>
       <p id="line-number" class="line-number" aria-live="polite" hidden></p>
     </header>
+    <p id="mode-badges" class="mode-badges" hidden></p>
     <p id="notice" class="notice" role="alert" hidden></p>
     <section id="join-panel" class="quiet-screen">
       <h2 id="join-heading">Your name</h2>
@@ -35,6 +36,10 @@
         </div>
         <div id="roster" class="roster" role="list" aria-label="Players in the party"></div>
       </section>
+      <details id="card-panel" class="card-panel" hidden open>
+        <summary><span class="eyebrow">YOUR CARD</span><span id="card-summary" class="card-summary"></span></summary>
+        <div id="card-body" class="card-body"></div>
+      </details>
       <section id="role-panel" class="roles-screen" hidden aria-labelledby="role-title">
         <div class="section-intro"><p class="eyebrow">ASSIGNMENT</p><h2 id="role-title" tabindex="-1">Choose your characters</h2><p id="role-help">Choose at least one character, then check your microphone.</p><p id="role-counts" class="role-counts" aria-live="polite"></p></div>
         <div id="character-options" class="character-options" role="list" aria-label="Pack characters"></div>
@@ -54,7 +59,14 @@
       <section id="reveal-panel" class="reveal-panel" hidden aria-labelledby="reveal-title">
         <p class="eyebrow">REVEAL</p><h2 id="reveal-title">What was really said</h2>
         <p class="help">Compare what was written with what each player said. Turn on ORIGINAL SUBTITLES during the final playback to read the line as it plays.</p>
+        <div id="reveal-cards" class="reveal-cards" hidden></div>
         <div id="reveal-list" class="reveal-list"></div>
+      </section>
+      <section id="pack-vote-panel" class="pack-vote-panel" hidden aria-labelledby="pack-vote-title">
+        <p class="eyebrow">NEXT PACK</p><h2 id="pack-vote-title">What should we dub?</h2>
+        <p class="help">Vote for the scene you want to play. The host sees your vote, and the most voted packs go to the top.</p>
+        <p id="pack-vote-status" class="help" role="status" aria-live="polite"></p>
+        <div id="pack-vote-grid" class="pack-vote-grid"></div>
       </section>
       <section id="line-navigation" class="line-navigation" hidden aria-label="Assigned line navigation">
         <label for="line-picker">Go to your line</label>
@@ -63,6 +75,10 @@
         <button id="cancel-retake" type="button" class="secondary" hidden>Cancel retake</button>
       </section>
       <section id="recording-panel" class="recording-panel" hidden aria-label="Record your line">
+        <div id="speed-bar" class="speed-bar" hidden>
+          <button id="speed-start" type="button">START</button>
+          <span id="speed-timer" class="speed-timer" role="timer" aria-live="off"></span>
+        </div>
         <div class="video-frame">
           <video id="line-video" muted playsinline preload="metadata" aria-label="Scene for your line"></video>
           <div id="countdown" class="countdown" role="status" aria-live="assertive" hidden></div>
