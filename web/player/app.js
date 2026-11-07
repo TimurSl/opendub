@@ -5,6 +5,7 @@ import { canRecordSelectedLine } from './eligibility.js';
 import { roleView } from './view-state.js';
 import { renderPlayerChip, renderProfilePicker, loadProfileChoice, saveProfileChoice } from '../shared/identity.js';
 import { colorHex } from '../shared/identity-data.js';
+import { modeBadges, speedState, renderCards, createRedubGrid, renderCardReveal } from './extras.js';
 
 const $ = id => document.getElementById(id);
 const client = new RuntimeClient('player');
@@ -120,8 +121,9 @@ function renderReveal(snapshot, visible) {
   const { session } = snapshot; const panel = $('reveal-panel');
   panel.hidden = !visible || !session.pack;
   if (panel.hidden) return;
-  const lines = session.pack.lines.filter(line => line.blind);
-  const key = JSON.stringify([session.matchId, lines.map(line => [line.id, session.lineTakes[line.id]?.id])]);
+  const lines = session.pack.lines.filter(line => line.blind || session.rules?.mystery);
+  renderCardReveal(session, snapshot.viewer.playerId, $('reveal-cards'), { onGuess: guessCard, busy: guessBusy });
+  const key = JSON.stringify([session.matchId, lines.map(line => [line.id, session.lineTakes[line.id]?.id, session.lineTakes[line.id]?.recorder?.id])]);
   if (panel.dataset.key === key) return;
   panel.dataset.key = key;
   const list = $('reveal-list'); list.replaceChildren();
@@ -137,7 +139,7 @@ function renderReveal(snapshot, visible) {
     if (take) add('The take', take.url);
     item.append(players); list.append(item);
   }
-  if (!lines.length) list.append(node('p', 'Nothing was hidden in this match.', 'muted'));
+  if (!lines.length) list.append(node('p', session.cards?.dealt ? 'No lines were hidden. Check the cards above.' : 'Nothing was hidden in this match.', 'muted'));
 }
 let profilePicker = null; let profileEditorOpen = false;
 async function changeProfile(patch) {
@@ -174,14 +176,14 @@ function renderProfile(snapshot, visible) {
   }
 }
 function roleKey(snapshot) {
-  return JSON.stringify([snapshot.session.id, snapshot.session.matchId, snapshot.session.pack?.id, snapshot.viewer.playerId, snapshot.session.settings?.gameMode, [...(snapshot.queue?.assignedCharacters || [])].sort(), [...(snapshot.queue?.lines || [])]]);
+  return JSON.stringify([snapshot.session.id, snapshot.session.matchId, snapshot.session.pack?.id, snapshot.viewer.playerId, snapshot.session.settings?.assignmentStyle, [...(snapshot.queue?.assignedCharacters || [])].sort(), [...(snapshot.queue?.lines || [])]]);
 }
 function microphoneReady() {
   return !!recorder.stream?.getAudioTracks().some(track => track.readyState === 'live');
 }
 $('ready').addEventListener('click', async () => {
   const snapshot = client.state;
-  if (!snapshot || readyBusy || !(snapshot.session.settings?.gameMode === 'line' ? snapshot.queue?.lines.length : snapshot.queue?.assignedCharacters.length)) return;
+  if (!snapshot || readyBusy || !(snapshot.session.settings?.assignmentStyle === 'line' ? snapshot.queue?.lines.length : snapshot.queue?.assignedCharacters.length)) return;
   const key = roleKey(snapshot); const readiness = readinessGeneration;
   readyBusy = true; $('ready').disabled = true; clearNotice();
   try {
@@ -296,13 +298,59 @@ async function changeRole(character, action) {
     if (client.state) render(client.state);
   }
 }
+// ---- speed rounds, redub requests and card guesses
+let guessBusy = false; let speedTick = null; let lastSpeedPhase = null;
+const redubBusy = new Set();
+const redubGrid = createRedubGrid({ container: $('redub-grid'), onVote: voteRedub });
+recorder.onSaved = () => {
+  // A speed round accepts the take as soon as it is saved: one take, no review.
+  if (client.state?.session.rules?.speed?.enabled && !recorder.retakeId) recorder.next().catch(error);
+};
+async function voteRedub(lineId, vote, button) {
+  if (redubBusy.has(lineId)) return;
+  redubBusy.add(lineId); button.disabled = true; $('redub-status').textContent = '';
+  try { await client.request('/api/player/redub-vote', { lineId, vote }); }
+  catch (problem) {
+    $('redub-status').textContent = problem.status === 409 || problem.status === 400 ? problem.message : friendlyMessage(problem);
+    if (problem.status === 409 || problem.status === 403) await client.refresh().catch(() => {});
+  } finally { redubBusy.delete(lineId); if (client.state) render(client.state); }
+}
+async function guessCard(targetPlayerId, cardId) {
+  if (guessBusy) return;
+  guessBusy = true; clearNotice(); if (client.state) render(client.state);
+  try { await client.request('/api/player/guess', { targetPlayerId, cardId }); }
+  catch (problem) { showNotice(problem.status === 409 || problem.status === 400 ? problem.message : friendlyMessage(problem)); if (problem.status === 409) await client.refresh().catch(() => {}); }
+  finally { guessBusy = false; if (client.state) render(client.state); }
+}
+$('speed-start').addEventListener('click', async () => {
+  const lineId = selectedLineId; if (!lineId) return;
+  $('speed-start').disabled = true; clearNotice();
+  try { await client.request('/api/player/open-line', { lineId }); }
+  catch (problem) { showNotice(problem.status === 409 ? problem.message : friendlyMessage(problem)); }
+  finally { $('speed-start').disabled = false; if (client.state) render(client.state); }
+});
+// The server owns the clock; this only counts down what it reports.
+function updateSpeed(session, line, take, visible) {
+  const state = line && visible ? speedState(session, line.id, take, client.serverNow()) : { enabled: false };
+  const bar = $('speed-bar'); bar.hidden = !state.enabled || state.phase === 'taken';
+  clearInterval(speedTick); speedTick = null;
+  if (bar.hidden) { lastSpeedPhase = null; return state; }
+  $('speed-start').hidden = state.phase !== 'idle';
+  const seconds = session.rules.speed.lineTimeLimitSec;
+  $('speed-timer').textContent = state.phase === 'idle' ? `Press START when you are ready. You will have ${seconds} seconds plus the length of the line.`
+    : state.phase === 'expired' ? 'Time is up for this line. Ask the host to reopen it.' : `Time left: ${Math.ceil(state.remaining / 1000)} s`;
+  bar.classList.toggle('is-expired', state.phase === 'expired'); bar.classList.toggle('is-running', state.phase === 'running');
+  lastSpeedPhase = state.phase;
+  if (state.phase === 'running') speedTick = setInterval(() => { if (client.state) render(client.state); }, 250);
+  return state;
+}
 function render(snapshot) {
   if (snapshot.viewer.kind !== 'player') return;
   const session = snapshot.session; const pack = session.pack; const queue = snapshot.queue;
   if (roomId && session.id !== roomId) return;
   if (currentMatchId !== session.matchId) {
     currentMatchId = session.matchId; selectedLineId = null; preparedRoles = null; rolesFingerprint = null;
-    rolePending.clear(); readinessGeneration++;
+    rolePending.clear(); readinessGeneration++; redubGrid.reset(); redubBusy.clear();
   }
   const player = session.players.find(item => item.id === snapshot.viewer.playerId);
   const currentRoleKey = roleKey(snapshot);
@@ -310,7 +358,7 @@ function render(snapshot) {
     preparedRoles = null; readinessGeneration++;
   }
   rolesFingerprint = currentRoleKey; previousServerReady = !!player?.ready; previousPhase = session.state; previousRolesLocked = !!session.rolesLocked;
-  const lineMode = session.settings.gameMode === 'line';
+  const lineMode = session.settings.assignmentStyle === 'line';
   const hasTasks = !!queue?.lines.length;
   const prepared = preparedRoles === currentRoleKey && microphoneReady();
   const ownedLineIds = queue?.lines || [];
@@ -331,6 +379,7 @@ function render(snapshot) {
     activeRetakeLineId: ownedActiveRetake?.lineId, hasRetakeAttemptForTab,
   });
   const done = ['recording', 'review', 'paused'].includes(session.state) && hasTasks && !queue.pendingLines.length;
+  const speed = updateSpeed(session, line, line ? session.lineTakes[line.id] : null, recording);
   if (session.state === 'paused') recorder.pauseCapture();
   $('join-panel').hidden = true; $('room-panel').hidden = false;
   $('pack-title').textContent = pack?.metadata.title || 'Your party';
@@ -342,6 +391,13 @@ function render(snapshot) {
   const revealing = session.state === 'reveal';
   $('waiting-panel').hidden = showRoles || recording || finalPlayback || revealing;
   renderReveal(snapshot, revealing);
+  const badges = modeBadges(session);
+  $('mode-badges').hidden = !badges.length || finalPlayback; $('mode-badges').textContent = badges.join('  ·  ');
+  renderCards(session, selectedLineId, { panel: $('card-panel'), summary: $('card-summary'), body: $('card-body') });
+  if (finalPlayback) $('card-panel').hidden = true;
+  const redubShown = redubGrid.render(session, { busy: redubBusy });
+  const redubVisible = !recording && !showRoles && !finalPlayback && ['recording', 'paused', 'review', 'reveal'].includes(session.state) && redubShown > 0;
+  $('redub-panel').hidden = !redubVisible; $('waiting-panel').classList.toggle('compact', redubVisible);
   renderProfile(snapshot, !recording && !finalPlayback);
   renderExports(snapshot, !recording);
   $('recording-panel').style.setProperty('--chip', colorHex(player?.color));
@@ -376,7 +432,7 @@ function render(snapshot) {
   $('cancel-retake').hidden = !(recorder.retakeId || recorder.retakeAttemptPending);
   $('cancel-retake').disabled = picker.disabled;
   const viewLine = recordingLine ? line : null;
-  recorder.setLine(pack, viewLine, lineAllowed, session.settings, session.state === 'paused', session.matchId);
+  recorder.setLine(pack, viewLine, lineAllowed && speed.canRecord, session.settings, session.state === 'paused', session.matchId);
   if (viewLine) recorder.setTakes(session.lineTakes[line.id], session.lineTakes[line.id]?.status === 'accepted' ? session.lineTakes[line.id] : null, session.replacementTakes?.[line.id]);
   if (recording) {
     $('line-number').hidden = false;

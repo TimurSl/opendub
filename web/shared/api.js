@@ -6,7 +6,9 @@ export class RuntimeClient extends EventTarget {
   }
   async request(path, body, { multipart = false, method, retakeId, takeTiming } = {}) {
     const matchId = this.state?.session?.matchId;
-    const partyOnly = ['/api/admin/packs', '/api/admin/login', '/api/admin/create-party', '/api/admin/next-match', '/api/admin/select', '/api/admin/settings'].includes(path);
+    // Card decks belong to the host, not to a match. Only dealing, re-dealing, vetoing and turning the cards face up are match-scoped.
+    const deckRoute = (path.startsWith('/api/admin/cards') || path.startsWith('/api/admin/decks')) && !['/api/admin/cards/deal', '/api/admin/cards/redeal', '/api/admin/cards/veto', '/api/admin/cards/open'].includes(path);
+    const partyOnly = deckRoute || ['/api/admin/packs', '/api/admin/login', '/api/admin/create-party', '/api/admin/next-match', '/api/admin/select', '/api/admin/settings'].includes(path);
     const matchScoped = (path.startsWith('/api/player/') && path !== '/api/player/profile') || /^\/api\/takes\/[^/]+(?:\/accept|\/retake(?:\/cancel)?|\/discard)?$/.test(path) || (path.startsWith('/api/admin/') && !partyOnly);
     if (body !== undefined && !multipart && matchId && matchScoped) {
       body = { ...body, matchId };
