@@ -317,6 +317,7 @@ export async function createRuntime(options = {}) {
   adminAction("pause", {}, () => store.pause());
   adminAction("resume", {}, () => store.resume());
   adminAction("review", {}, () => store.openReview());
+  adminAction("reveal", {}, () => store.openReveal());
   adminAction("accept-all", {}, () => store.acceptAll());
   adminAction("restart-playback", {}, () => {
     if (store.data.state !== "playback") fail("Playback is not active", 409);
@@ -670,6 +671,9 @@ export async function createRuntime(options = {}) {
     if (store.pack?.id !== req.params.packId) fail("Only the selected pack may be served", 404);
     const asset = store.pack.assets[req.params.assetId];
     if (!asset) fail("Unknown pack asset", 404);
+    // Reference audio of blind lines stays secret from players until the reveal. Hiding the URL
+    // is not enough: asset ids are stable, so the route enforces it too.
+    if (req.viewer.kind === "player" && store.hiddenAssetIds().has(req.params.assetId)) fail("This audio is hidden until the reveal", 403);
     const real = await fs.realpath(asset.path);
     const permittedRoot = asset.cached ? path.join(dataDir, "video-cache") : store.pack.directory;
     const relative = path.relative(permittedRoot, real);
@@ -693,7 +697,13 @@ export async function createRuntime(options = {}) {
     if (req.viewer.kind !== "admin" && !store.data.options.libraryVisibleToPlayers) return next(Object.assign(new Error("The library is not shared with players"), { status: 403 }));
     next();
   };
-  const entryId = req => { if (!/^[A-Za-z0-9_-]{8,64}$/.test(req.params.id) || !library.has(req.params.id)) fail("Unknown library entry", 404); return req.params.id; };
+  // Players must not read the live match's own entry (full captions) before the reveal.
+  const hiddenFromPlayers = id => store.secretsActive() && id === library.byMatch.get(store.data.matchId);
+  const entryId = req => {
+    if (!/^[A-Za-z0-9_-]{8,64}$/.test(req.params.id) || !library.has(req.params.id)) fail("Unknown library entry", 404);
+    if (req.viewer.kind !== "admin" && hiddenFromPlayers(req.params.id)) fail("This dub is hidden until the reveal", 403);
+    return req.params.id;
+  };
   // The pack must still be installed and identical for a replay.
   async function replayInfo(manifest) {
     const pack = store.packs.get(manifest.pack.id);
@@ -702,7 +712,7 @@ export async function createRuntime(options = {}) {
     return { replayable: true };
   }
   app.get("/api/library", authenticated(), libraryViewer, (req, res) => {
-    const entries = library.list().filter(entry => req.viewer.kind === "admin" || !entry.damaged);
+    const entries = library.list().filter(entry => req.viewer.kind === "admin" || (!entry.damaged && !hiddenFromPlayers(entry.id)));
     res.json({ enabled: true, entries });
   });
   app.get("/api/library/:id", authenticated(), libraryViewer, async (req, res) => {

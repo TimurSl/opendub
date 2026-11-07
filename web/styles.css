@@ -315,3 +315,6 @@ footer { max-width:1260px; padding:0 24px 24px; margin:auto; color:var(--muted);
 .export-job progress { flex:1 1 140px; max-width:260px; }
 .job-label { font-weight:650; min-width:96px; }
 .job-error { color:var(--danger); }
+.take-row.is-blind .take-title::after, .line-assignment-row.is-blind .role-info strong::after { content:"BLIND"; margin-left:8px; padding:1px 6px; border:1px solid var(--muted); border-radius:3px; color:var(--muted); font-size:11px; font-weight:700; letter-spacing:.06em; vertical-align:middle; }
+.setting-group { margin:0; padding:0; border:0; grid-column:1 / -1; display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:10px 16px; }
+.setting-group legend { padding:0; margin-bottom:8px; font-weight:700; }

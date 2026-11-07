@@ -115,6 +115,31 @@ function renderExports(snapshot, visible) {
     list.append(row);
   }
 }
+// The reveal: every blind line shown with what was written, the original, and the take.
+function renderReveal(snapshot, visible) {
+  const { session } = snapshot; const panel = $('reveal-panel');
+  panel.hidden = !visible || !session.pack;
+  if (panel.hidden) return;
+  const lines = session.pack.lines.filter(line => line.blind);
+  const key = JSON.stringify([session.matchId, lines.map(line => [line.id, session.lineTakes[line.id]?.id])]);
+  if (panel.dataset.key === key) return;
+  panel.dataset.key = key;
+  const list = $('reveal-list'); list.replaceChildren();
+  for (const line of lines) {
+    const take = session.lineTakes[line.id];
+    const item = node('article', undefined, 'reveal-item');
+    const head = node('div', undefined, 'reveal-head');
+    head.append(node('strong', `LINE ${session.pack.lines.indexOf(line) + 1} · ${line.character}`));
+    if (take?.recorder) head.append(renderPlayerChip(take.recorder, { size: 24 }));
+    item.append(head, node('p', line.caption, 'caption'));
+    const players = node('div', undefined, 'reveal-audio');
+    const add = (label, url) => { const wrap = node('label', label); const audio = node('audio'); audio.controls = true; audio.preload = 'none'; audio.src = url; wrap.append(audio); players.append(wrap); };
+    if (line.referenceAudio) add('Original', line.referenceAudio);
+    if (take) add('The take', take.url);
+    item.append(players); list.append(item);
+  }
+  if (!lines.length) list.append(node('p', 'Nothing was hidden in this match.', 'muted'));
+}
 let profilePicker = null; let profileEditorOpen = false;
 async function changeProfile(patch) {
   const status = $('profile-status');
@@ -315,7 +340,9 @@ function render(snapshot) {
   $('recording-panel').hidden = !recording;
   $('recording-microphone-help').hidden = !recording || microphoneReady();
   $('playback-panel').hidden = !finalPlayback;
-  $('waiting-panel').hidden = showRoles || recording || finalPlayback;
+  const revealing = session.state === 'reveal';
+  $('waiting-panel').hidden = showRoles || recording || finalPlayback || revealing;
+  renderReveal(snapshot, revealing);
   renderProfile(snapshot, !recording && !finalPlayback);
   renderExports(snapshot, !recording);
   $('recording-panel').style.setProperty('--chip', colorHex(player?.color));
@@ -331,7 +358,8 @@ function render(snapshot) {
     const index = pack.lines.indexOf(item); const accepted = session.lineTakes[item.id]?.status === 'accepted';
     const replacement = session.replacementTakes?.[item.id];
     const status = replacement ? 'Replacement ready' : accepted ? 'Accepted' : session.lineTakes[item.id]?.status === 'recorded' ? 'Ready for NEXT' : 'Needs a take';
-    const caption = item.caption.length > 48 ? `${item.caption.slice(0, 45)}…` : item.caption;
+    const shown = item.captionHidden ? '???' : item.caption;
+    const caption = shown.length > 48 ? `${shown.slice(0, 45)}…` : shown;
     const option = node('option', `LINE ${index + 1} · ${item.character} · ${caption} · ${status}`);
     option.value = item.id; picker.append(option);
   }
@@ -353,9 +381,15 @@ function render(snapshot) {
   if (viewLine) recorder.setTakes(session.lineTakes[line.id], session.lineTakes[line.id]?.status === 'accepted' ? session.lineTakes[line.id] : null, session.replacementTakes?.[line.id]);
   if (recording) {
     $('line-number').hidden = false;
-    $('line-number').textContent = `LINE ${queue.lines.indexOf(line.id) + 1} / ${queue.lines.length}`;
+    const blindNow = !!line.blind && !!session.secretsActive;
+    $('line-number').textContent = `LINE ${queue.lines.indexOf(line.id) + 1} / ${queue.lines.length}${blindNow ? ' · BLIND' : ''}`;
     $('line-character').textContent = line.character;
-    $('line-caption').textContent = line.caption;
+    $('line-caption').textContent = line.captionHidden ? '???' : line.caption;
+    // Hidden controls are removed, not disabled, so the layout does not hint at what is missing.
+    $('original').hidden = !!line.referenceHidden;
+    $('waveform-legend').querySelector('span:first-child').hidden = !!line.referenceHidden;
+    $('waveform-status').hidden = !!line.referenceHidden;
+    $('recording-panel').classList.toggle('scene-blind', blindNow && !!line.blind.scene);
     if (visibleMode !== 'recording') requestAnimationFrame(() => recorder.drawWaveform());
   } else $('line-number').hidden = true;
   if (showRoles) {
@@ -420,7 +454,7 @@ document.addEventListener('keydown', event => {
   if (target?.matches?.('input,textarea,select,[contenteditable="true"],button')) return;
   if ($('recording-panel').hidden) return;
   const control = ({ o: 'original', r: 'record', t: 'my-take', n: 'next' })[event.key.toLowerCase()];
-  if (!control || $(control).disabled) return;
+  if (!control || $(control).disabled || $(control).hidden) return;
   event.preventDefault(); $(control).click();
 });
 

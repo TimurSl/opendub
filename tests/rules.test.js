@@ -10,8 +10,9 @@ const settings = (extra = {}) => ({
 
 test('validateRules accepts defaults and rejects unknown keys, bad modes and out-of-range values', () => {
   assert.deepEqual(validateRules({}), defaultRules());
-  assert.deepEqual(validateRules({ takeLimit: 2, mode: 'line' }), { mode: 'line', takeLimit: 2, allowPlayerRetakes: true });
-  for (const bad of [{ mode: 'duet' }, { takeLimit: -1 }, { takeLimit: 21 }, { takeLimit: 1.5 }, { takeLimit: '1' }, { allowPlayerRetakes: 1 }, { blind: {} }, { __proto__x: 1 }]) {
+  assert.deepEqual(validateRules({ takeLimit: 2, mode: 'line' }), { mode: 'line', takeLimit: 2, allowPlayerRetakes: true, blind: { caption: false, reference: false, scene: false, share: 1 } });
+  assert.deepEqual(validateRules({ blind: { caption: true, share: 0.5 } }).blind, { caption: true, reference: false, scene: false, share: 0.5 });
+  for (const bad of [{ mode: 'duet' }, { takeLimit: -1 }, { takeLimit: 21 }, { takeLimit: 1.5 }, { takeLimit: '1' }, { allowPlayerRetakes: 1 }, { blind: null }, { blind: [] }, { blind: { caption: 'yes' } }, { blind: { share: 2 } }, { blind: { share: -0.1 } }, { blind: { share: NaN } }, { blind: { share: '1' } }, { blind: { surprise: true } }, { cards: {} }]) {
     assert.throws(() => validateRules(bad), { status: 400 }, JSON.stringify(bad));
   }
   assert.throws(() => validateRules(null), { status: 400 });

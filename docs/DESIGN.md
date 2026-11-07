@@ -119,6 +119,7 @@ All mutation requests are JSON except multipart take uploads. Errors return `{ "
 | `POST /api/admin/retake` | `{lineId, matchId}` | Removes take, makes task pending again |
 | `POST /api/admin/accept` | `{lineId, matchId}` | Accepts an uploaded take after host review |
 | `POST /api/admin/playback` | `{allowMissing, matchId}` | Starts playback; missing accepted takes require explicit override |
+| `POST /api/admin/reveal` | `{matchId}` | Moves review to the `reveal` state and unredacts blind lines. 409 when the match has no blind lines. Final playback is refused (409) until it has run whenever blind lines exist |
 | `POST /api/admin/stop-playback` | `{matchId}` | Returns to recording/review |
 | `POST /api/join` | `{roomId, joinToken, nickname, color?, avatar?}` | Joins the party by stable ID, before or during its lobby; returns player state. A taken color falls back to the first free one; unknown colors or avatars are rejected |
 | `POST /api/player/profile` | `{nickname?, color?, avatar?}` (no `matchId`) | Restyles the player in any state except playback. `avatar: ""` clears it. A color another player holds answers 409 with `suggestion` (the next free color) while a free color exists |
@@ -195,6 +196,10 @@ The recording comparison decodes time-domain samples for the original/reference 
 Final playback preloads the backing track and accepted takes, decodes them into Web Audio buffers, and schedules them against a single `AudioContext` clock. The backing starts at timeline zero and each take starts at the Workshop line start. Clip accepted voice duration to the corresponding line window so an overlong take cannot run indefinitely. Overlapping takes mix naturally. The visual video is muted and follows that timeline; seeking/rejoining rebuilds the schedule with offsets. Do not use independent JavaScript timers for each line.
 
 The host broadcasts one future playback epoch. Browsers estimate their offset to the server clock, preload audio, and schedule a common start. Late joiners enter at the elapsed timeline time. Network timing affects when a browser begins watching, never where a take belongs in the dub. This is best-effort shared playback, not sample-perfect synchronization between devices.
+
+## Redaction and the reveal
+
+`snapshot()` ends with `redactFor(viewer, session, {blindLines, revealed})`. The host sees everything plus `blindLines`. Players receive blind lines with `caption: ""` / `referenceAudio: null` (and `captionHidden` / `referenceHidden`) until `data.revealed` is true, so no secret text or URL exists in their JSON, including WebSocket pushes. `GET /media` also refuses a blind line's reference asset for players, and the live match's library entry is hidden from players until the reveal. Blind lines are picked once per match, in `startRecording()`, with a seeded shuffle (`share` of the lines, at least one when `share > 0`); recording restarts do not re-roll. Lifecycle: `recording -> review -> [reveal] -> playback`; a host retake clears `revealed` and returns to `recording`.
 
 ## Library and exports
 

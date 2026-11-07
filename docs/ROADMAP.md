@@ -17,6 +17,10 @@ Each section builds on the current architecture in [DESIGN.md](DESIGN.md): one i
 | --- | --- | --- |
 | 1 | §1 Avatars and colors | **Done** |
 | 2 | §0.1 rules (take limit, retakes), §2 Library, §3 Export jobs | **Done**, with the gaps listed in each section |
+| 3 | §0.2 redaction, §0.3 reveal, §4 Blind lines | **Done**, with the gaps listed in §4 |
+| 4 | §5 modes: duet, relay, speed, mystery | Not started |
+| 5 | §0.4 server effects, §6 Cards | Not started |
+| 6 | §5 swap (rounds) | Not started |
 
 Deviations from the plan are noted in each section as they are implemented.
 
@@ -283,6 +287,15 @@ The options combine. For example, `caption + reference` gives an improv round, a
 - `share` picks the expected number of lines, and the selection is stable across snapshots.
 
 **Size:** small-medium. It exercises §0.2 and §0.3, which makes it a good first secret rule.
+
+**Implemented.** `server/session/redact.js` holds `redactFor` (pure, unit-tested) and the `/media` check; `reveal` is a real session state between `review` and `playback`. Deviations:
+
+- **Scene blindness is client-side only.** The recorder's cue timing is driven by playing the scene video, so the server cannot withhold the video from players without breaking recording. The video is hidden visually and replaced by a placeholder, timing bar and countdown, but a player using devtools can still fetch it. Caption and reference-audio blindness *are* enforced by the server (text and URL removed from player snapshots, `/media` returns 403 until the reveal).
+- Blind lines never fall back to the scene's own audio for the Original button or waveform.
+- A host retake after the reveal makes all lines blind again until the host reveals again.
+- The live match's library entry is hidden from players until the reveal.
+- Players do get a per-line `blind` flag (and `captionHidden` / `referenceHidden`), because the recorder has to show "???" and a BLIND badge. The host additionally gets the `blindLines` map.
+- **Not done:** the "what was written" subtitle toggle in final playback (playback has no subtitles today), and the eye-slash icon (blind lines show a text BLIND tag in the host's lists instead).
 
 ---
 

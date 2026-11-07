@@ -60,6 +60,8 @@ Typical host workflow:
 8. Every match is saved to the **Library** automatically when it reaches review. Open **Library** in the top bar to replay a saved dub on your screen, export it, download its takes as a ZIP, rename, star (starred dubs are never pruned), or delete it. A replay needs the original pack to be installed unchanged; the takes stay downloadable either way.
 9. On review and playback, **Take the dub home** starts background renders (MP4 video, M4A audio) that keep going if you leave the page, and downloads a ZIP of all takes. Set **Who can download exports** to share them with players, and tick **Players can see the library** to share the library list.
 
+**Blind lines** (under match setup) let players record without full information: hide the caption, the original audio, the scene, or any combination, for all lines or a random share of them. The server removes hidden captions and original audio from player snapshots and refuses to serve the original audio until you press **Reveal blind lines** on the review screen; then every player sees what was written, the original, and each take side by side, and you can start final playback. Hiding the scene is best effort because the video file is still loaded in the browser.
+
 Match setup also has a **Take limit per line** (0 for unlimited; 1 gives one take per line, enforced by the server) and a switch for **Players may retake**.
 
 Library settings: `LIBRARY=off` disables saving, `LIBRARY_MAX_ENTRIES` (default 200) and `LIBRARY_MAX_BYTES` (default 10 GB) bound its size. Saved dubs live in `<data dir>/library`; the live match is still cleared by a restart.

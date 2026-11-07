@@ -118,6 +118,12 @@
           <label class="setting"><input id="compact-mobile" type="checkbox"><span><strong>Compact controls on phones</strong><small>Use a tighter recording layout on small screens.</small></span></label>
           <label class="setting setting-number"><span><strong>Take limit per line</strong><small>0 means unlimited. 1 gives each line a single take.</small></span><input id="take-limit" type="number" min="0" max="20" step="1" value="0"></label>
           <label class="setting"><input id="allow-retakes" type="checkbox" checked><span><strong>Players may retake</strong><small>Off: only you can request retakes.</small></span></label>
+          <fieldset class="setting-group blind-settings"><legend>Blind lines <small class="muted">Players record without full information; you reveal it afterwards.</small></legend>
+            <label class="setting"><input id="blind-caption" type="checkbox"><span><strong>Hide the caption</strong><small>Players see “???” and the character name.</small></span></label>
+            <label class="setting"><input id="blind-reference" type="checkbox"><span><strong>Hide the original</strong><small>No ORIGINAL button or waveform.</small></span></label>
+            <label class="setting"><input id="blind-scene" type="checkbox"><span><strong>Hide the scene</strong><small>Timing bar and countdown only. Best effort: the video file is still loaded in the browser.</small></span></label>
+            <label class="setting setting-number"><span><strong>Share of lines that are blind</strong><small>Chosen at random when recording starts. <output id="blind-share-value">100%</output></small></span><input id="blind-share" type="range" min="1" max="100" step="1" value="100"></label>
+          </fieldset>
           <div class="settings-actions"><p id="settings-status" class="help" role="status" aria-live="polite">Changes save automatically.</p><button id="open-lobby" type="button">Open role selection</button></div>
         </form>
       </section>
@@ -192,6 +198,7 @@
           <div id="review-line-assignments" class="role-list"></div>
         </section>
         <section class="panel actions action-bar">
+          <button id="reveal-blind" type="button" hidden>Reveal blind lines</button>
           <button id="review-playback" type="button">Start final playback</button>
           <button id="accept-all" type="button" class="secondary">Accept all recorded takes</button>
           <button id="continue-recording" type="button" class="secondary">Continue recording</button>

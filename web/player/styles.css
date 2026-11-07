@@ -180,3 +180,15 @@ h2 { margin-bottom: 22px; font-size: clamp(28px, 4vw, 42px); font-weight: 550; l
 .export-job { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .export-job progress { flex: 1 1 120px; }
 .job-error { color: #ff8f8f; }
+
+.reveal-panel { margin: 18px 0; }
+.reveal-list { display: grid; gap: 14px; }
+.reveal-item { padding: 14px; border: 1px solid var(--border); border-radius: 6px; }
+.reveal-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.reveal-item .caption { margin: 8px 0; }
+.reveal-audio { display: grid; gap: 8px; }
+.reveal-audio label { display: grid; gap: 4px; font-size: 14px; color: var(--muted); }
+.reveal-audio audio { width: 100%; }
+.scene-blind .video-frame video { visibility: hidden; }
+.scene-blind .video-frame { min-height: 96px; }
+.scene-blind .video-frame::before { content: "Scene hidden: listen for your timing"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 8px; color: var(--muted); font-size: 14px; text-align: center; }

@@ -2,7 +2,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { defaultRules, validateRules } from "./rules.js";
+import { defaultRules, validateRules, blindActive } from "./rules.js";
+import { redactFor, hiddenReferenceAssets } from "./redact.js";
 import { COLOR_IDS, MARKERS, isAvatarId, isColorId } from "../../web/shared/identity-data.js";
 
 export function randomId(bytes = 18) { return randomBytes(bytes).toString("base64url"); }
@@ -43,7 +44,7 @@ export class SessionStore extends EventEmitter {
         libraryVisibleToPlayers: false, exportAccess: "host",
       },
       lineTakes: record({}), replacementTakes: record({}), activeRetakes: record({}),
-      lineAssignments: record({}), lineVersions: record({}), takeCounts: record({}), recordingStarted: false, playback: null, playbackSeen: false, pausedFrom: null,
+      lineAssignments: record({}), lineVersions: record({}), takeCounts: record({}), blindLines: record({}), revealed: false, recordingStarted: false, playback: null, playbackSeen: false, pausedFrom: null,
     };
   }
   async init() {
@@ -85,7 +86,7 @@ export class SessionStore extends EventEmitter {
       } catch (error) {
         this.data = oldData;
         this.data.roleAssignments = record(this.data.roleAssignments);
-        for (const key of ["roleAssignments", "lineAssignments", "readyPlayers", "lineTakes", "replacementTakes", "activeRetakes", "lineVersions", "takeCounts"]) {
+        for (const key of ["roleAssignments", "lineAssignments", "readyPlayers", "lineTakes", "replacementTakes", "activeRetakes", "lineVersions", "takeCounts", "blindLines"]) {
           this.data[key] = record(this.data[key] ?? {});
         }
         this.pack = oldPack;
@@ -143,6 +144,21 @@ export class SessionStore extends EventEmitter {
     const access = this.data.options.exportAccess;
     return access === "players" || (access === "players-after-playback" && this.data.playbackSeen);
   }
+  // Secret rules (blind lines, later cards) are in play and nothing has been revealed yet.
+  secretsActive() { return Object.keys(this.data.blindLines).length > 0 && !this.data.revealed; }
+  hiddenAssetIds() { return hiddenReferenceAssets(this.pack, this.data.blindLines, this.data.revealed); }
+  // Picks which lines are blind once per match, so the selection is stable across snapshots and
+  // restarts of recording. Seeded shuffle: a reproducible choice for a given seed.
+  pickBlindLines() {
+    const blind = this.data.rules.blind;
+    if (!blindActive(blind) || Object.keys(this.data.blindLines).length || !this.pack) return;
+    let seed = randomBytes(4).readUInt32LE();
+    const random = () => { seed = (seed + 0x6d2b79f5) >>> 0; let t = seed; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    const ids = this.pack.lines.map(line => line.id);
+    for (let index = ids.length - 1; index > 0; index--) { const target = Math.floor(random() * (index + 1)); [ids[index], ids[target]] = [ids[target], ids[index]]; }
+    const count = Math.min(ids.length, Math.max(1, Math.round(blind.share * ids.length)));
+    for (const id of ids.slice(0, count)) this.data.blindLines[id] = { caption: blind.caption, reference: blind.reference, scene: blind.scene };
+  }
   hasActiveRetakes() { return Object.keys(this.data.activeRetakes).length > 0; }
   cancelRetake(lineId) {
     const active = this.data.activeRetakes[lineId];
@@ -197,7 +213,10 @@ export class SessionStore extends EventEmitter {
       exportsAllowed: viewer.kind === "admin" || this.exportAllowedForPlayers(),
     };
     if (viewer.kind === "admin") session.joinToken = this.data.partyCreated ? this.data.joinToken : null;
-    return { type: "state", serverId: this.serverId, revision: this.revision, serverTime: Date.now(), viewer, session, queue: viewer.kind === "player" ? this.queue(viewer.playerId) : null };
+    session.revealed = this.data.revealed;
+    session.secretsActive = this.secretsActive();
+    const visible = redactFor(viewer, session, { blindLines: this.data.blindLines, revealed: this.data.revealed });
+    return { type: "state", serverId: this.serverId, revision: this.revision, serverTime: Date.now(), viewer, session: visible, queue: viewer.kind === "player" ? this.queue(viewer.playerId) : null };
   }
   createParty() {
     this.reset();
@@ -225,6 +244,8 @@ export class SessionStore extends EventEmitter {
     this.data.recordingStarted = false;
     this.data.lineVersions = record({});
     this.data.takeCounts = record({});
+    this.data.blindLines = record({});
+    this.data.revealed = false;
     this.data.playback = null;
     this.data.playbackSeen = false;
     this.data.pausedFrom = null;
@@ -250,6 +271,8 @@ export class SessionStore extends EventEmitter {
     this.data.recordingStarted = false;
     this.data.lineVersions = record({});
     this.data.takeCounts = record({});
+    this.data.blindLines = record({});
+    this.data.revealed = false;
     this.data.playback = null;
     this.data.playbackSeen = false;
     this.data.pausedFrom = null;
@@ -482,8 +505,9 @@ export class SessionStore extends EventEmitter {
     this.data.rolesLocked = true;
   }
   reopenRoles() {
-    if (!["assignment", "recording", "review", "paused"].includes(this.data.state)) fail("Role selection cannot be reopened now", 409);
+    if (!["assignment", "recording", "review", "reveal", "paused"].includes(this.data.state)) fail("Role selection cannot be reopened now", 409);
     this.data.state = "assignment";
+    this.data.revealed = false; // blind lines are blind again if recording restarts
     this.cancelAllRetakes();
     this.data.rolesLocked = false;
     this.data.readyPlayers = record({});
@@ -521,6 +545,7 @@ export class SessionStore extends EventEmitter {
     if (this.data.state === "playback") fail("Stop playback first", 409);
     if (this.data.state === "lobby") fail("Open the lobby first", 409);
     if (!this.canLockRoles()) fail(this.data.options.gameMode === "line" ? "Assign every line before recording" : "Assign every character before recording", 409);
+    this.pickBlindLines();
     this.data.rolesLocked = true;
     this.data.recordingStarted = true;
     this.data.state = this.allComplete() && !this.hasActiveRetakes() ? "review" : "recording";
@@ -540,6 +565,15 @@ export class SessionStore extends EventEmitter {
     if (!["recording", "review", "paused"].includes(this.data.state)) fail("Review is not available now", 409);
     if (this.hasActiveRetakes()) fail("Players are finishing retakes", 409);
     this.data.state = "review";
+    this.data.pausedFrom = null;
+  }
+  // The reveal step sits between review and playback. It unredacts blind captions and reference audio.
+  openReveal() {
+    if (!["recording", "review"].includes(this.data.state)) fail("Reveal is available from review", 409);
+    if (!Object.keys(this.data.blindLines).length) fail("There is nothing to reveal in this match", 409);
+    if (this.hasActiveRetakes()) fail("Players are finishing retakes", 409);
+    this.data.revealed = true;
+    this.data.state = "reveal";
     this.data.pausedFrom = null;
   }
   acceptAll() {
@@ -651,12 +685,17 @@ export class SessionStore extends EventEmitter {
     this.data.lineVersions[lineId] = (this.data.lineVersions[lineId] ?? 0) + 1;
     const previous = this.data.lineTakes[lineId];
     delete this.data.lineTakes[lineId];
-    if (["recording", "review"].includes(this.data.state)) this.data.state = "recording";
+    if (["recording", "review", "reveal"].includes(this.data.state)) {
+      // A re-recorded line is blind again: the reveal is undone until the host repeats it.
+      this.data.revealed = false;
+      this.data.state = "recording";
+    }
     return previous;
   }
   startPlayback(allowMissing) {
     if (!this.pack) fail("Select a pack first", 409);
-    if (!["recording", "review"].includes(this.data.state)) fail("Start recording first", 409);
+    if (!["recording", "review", "reveal"].includes(this.data.state)) fail("Start recording first", 409);
+    if (this.secretsActive()) fail("Reveal the blind lines before final playback", 409);
     if (!this.allComplete() && !allowMissing) fail("Required lines are missing accepted takes", 409);
     if (this.hasActiveRetakes()) fail("Players are finishing retakes", 409);
     this.data.state = "playback";

@@ -29,7 +29,7 @@ let viewedStage = null; let previousProgressStage = null; let renderedPackListKe
 let copyResetTimer = null;
 
 const STAGE_TITLES = ['Choose a pack', 'Set up the match', 'Assign roles', 'Recording', 'Review the takes', 'Final playback'];
-const PHASE_LABELS = { lobby: 'Setting up', assignment: 'Choosing roles', recording: 'Recording', paused: 'Paused', review: 'Reviewing', playback: 'Playing' };
+const PHASE_LABELS = { lobby: 'Setting up', assignment: 'Choosing roles', recording: 'Recording', paused: 'Paused', review: 'Reviewing', reveal: 'Revealing', playback: 'Playing' };
 const ASSIGNMENT_CONTAINERS = ['roles', 'recording-roles', 'line-assignments', 'recording-line-assignments', 'review-line-assignments'];
 const plural = (count, word, many = `${word}s`) => `${count} ${count === 1 ? word : many}`;
 const lineNumber = (pack, lineId) => pack.lines.findIndex(line => line.id === lineId) + 1;
@@ -154,7 +154,7 @@ function readSessionSettings() {
     voiceEffectsEnabled: $('effects-enabled').checked,
     compactMobilePreferred: $('compact-mobile').checked,
     exportAccess: $('export-access').value, libraryVisibleToPlayers: $('library-visible').checked,
-    rules: { mode: $('game-mode').value, takeLimit: Number($('take-limit').value || 0), allowPlayerRetakes: $('allow-retakes').checked },
+    rules: { mode: $('game-mode').value, takeLimit: Number($('take-limit').value || 0), allowPlayerRetakes: $('allow-retakes').checked, blind: { caption: $('blind-caption').checked, reference: $('blind-reference').checked, scene: $('blind-scene').checked, share: Number($('blind-share').value) / 100 } },
   };
 }
 const SETTINGS_HINT = 'Changes save automatically.';
@@ -188,6 +188,7 @@ $('multiple-roles').addEventListener('change', () => {
   else if ($('max-roles').value === '1') $('max-roles').value = '0';
   updateMaxRoles();
 });
+$('blind-share').addEventListener('input', () => { $('blind-share-value').textContent = `${$('blind-share').value}%`; });
 $('game-mode').addEventListener('change', () => updateGameModeView($('game-mode').value));
 $('settings-form').addEventListener('change', () => quietly(saveSettings()));
 $('open-lobby').addEventListener('click', async () => {
@@ -226,6 +227,7 @@ async function startSharedPlayback(allowMissing, button) {
   } catch (problem) { error(problem); }
   finally { endPending(button); }
 }
+$('reveal-blind').addEventListener('click', () => quietly(action('reveal', {}, $('reveal-blind'))));
 $('review-playback').addEventListener('click', () => startSharedPlayback(false, $('review-playback')));
 $('skip-missing').addEventListener('click', () => {
   const session = client.state?.session; if (!session) return;
@@ -540,13 +542,15 @@ function renderSetup(session) {
       'effects-enabled': settings.voiceEffectsEnabled,
       'compact-mobile': settings.compactMobilePreferred,
       'take-limit': session.rules?.takeLimit ?? 0,
+      'blind-caption': session.rules?.blind?.caption, 'blind-reference': session.rules?.blind?.reference, 'blind-scene': session.rules?.blind?.scene,
+      'blind-share': Math.round((session.rules?.blind?.share ?? 1) * 100),
       'allow-retakes': session.rules?.allowPlayerRetakes ?? true,
     };
     for (const [id, value] of Object.entries(values)) {
       const input = $(id);
       if (document.activeElement === input) continue;
       if (id === 'game-mode') input.value = value;
-      else if (id === 'take-limit') input.value = String(value);
+      else if (id === 'take-limit' || id === 'blind-share') { input.value = String(value); if (id === 'blind-share') $('blind-share-value').textContent = `${value}%`; }
       else if (id === 'max-roles') { input.value = String(value ?? 0); input.max = String(pack.characters.length); }
       else input.checked = !!value;
     }
@@ -675,6 +679,7 @@ function renderLineAssignmentRows(containerId, session) {
     if (document.activeElement !== row.select) row.select.value = ownerId;
     if (!pendingButtons.has(row.select)) row.select.disabled = !session.players.length || ['lobby', 'playback'].includes(session.state);
     row.element.classList.toggle('is-free', !owner);
+    row.element.classList.toggle('is-blind', !!session.blindLines?.[line.id]);
     row.element.classList.toggle('is-offline', !!owner && !owner.connected && take?.status !== 'accepted');
     row.element.hidden = onlyOpen && take?.status === 'accepted';
   }
@@ -763,18 +768,23 @@ function renderReview(session) {
   const filterLabels = { all: `All lines (${session.totalLineCount})`, recorded: `Needs review (${toReview})`, pending: `Missing (${missing})`, accepted: `Accepted (${accepted})` };
   for (const option of $('line-filter').options) option.textContent = filterLabels[option.value];
   const activeRetakes = session.activeRetakes || [];
-  const inReview = session.state === 'review';
+  const inReview = ['review', 'reveal'].includes(session.state);
+  const secret = !!session.secretsActive;
   if (!pendingButtons.has($('accept-all'))) $('accept-all').disabled = !toReview || !['recording', 'review'].includes(session.state);
   $('accept-all').hidden = !toReview;
   $('accept-all').textContent = `Accept ${toReview > 1 ? `all ${toReview} recorded takes` : 'the recorded take'}`;
   $('continue-recording').hidden = !inReview || accepted >= session.totalLineCount;
-  $('review-playback').disabled = accepted < session.totalLineCount || !inReview || activeRetakes.length > 0;
+  $('reveal-blind').hidden = !secret || !['review', 'recording'].includes(session.state);
+  if (!pendingButtons.has($('reveal-blind'))) $('reveal-blind').disabled = activeRetakes.length > 0 || session.state !== 'review';
+  $('review-playback').disabled = accepted < session.totalLineCount || !inReview || activeRetakes.length > 0 || secret;
   $('skip-missing').hidden = !inReview || accepted >= session.totalLineCount;
-  $('skip-missing').disabled = activeRetakes.length > 0;
+  $('skip-missing').disabled = activeRetakes.length > 0 || secret;
   $('next-match-review').disabled = !inReview;
   $('next-match-review').hidden = !inReview;
   $('review-hint').textContent = ['recording', 'paused'].includes(session.state)
     ? 'Players are still recording. You can already listen to, accept, or retake uploaded takes here.'
+    : secret && inReview ? 'Blind lines are still hidden from players. Press Reveal blind lines when you are ready; then start the final playback.'
+    : session.state === 'reveal' ? 'Everything is revealed on the players\' screens. Start the final playback when you are ready.'
     : activeRetakes.length ? 'Waiting for a retake to finish before playback can start.'
     : toReview && !missing ? `Accept or retake ${plural(toReview, 'take')} to start the final playback.`
     : toReview || missing ? `${plural(session.totalLineCount - accepted, 'line')} without an accepted take. Accept them, continue recording, or play without them.`
@@ -829,6 +839,7 @@ function renderTakes(session) {
     row.audio.hidden = !take; row.placeholder.hidden = !!take;
     row.accept.hidden = take?.status !== 'recorded';
     if (!pendingButtons.has(row.accept)) row.accept.disabled = !['recording', 'review'].includes(session.state);
+    row.element.classList.toggle('is-blind', !!session.blindLines?.[line.id]);
     row.retake.hidden = !take;
     if (!pendingButtons.has(row.retake)) row.retake.disabled = session.state === 'playback';
     row.element.dataset.status = status;
