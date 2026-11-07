@@ -288,3 +288,4 @@ footer { max-width:1260px; padding:0 24px 24px; margin:auto; color:var(--muted);
   .heading-actions button { flex:1; }
 }
 #phase, #recording-state { text-transform:none; }
+.role-owner { display:block; margin:3px 0 2px; }

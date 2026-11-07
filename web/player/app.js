@@ -3,6 +3,8 @@ import { LineRecorder } from '../recorder/recorder.js';
 import { DubPlayback } from '../playback/playback.js';
 import { canRecordSelectedLine } from './eligibility.js';
 import { roleView } from './view-state.js';
+import { renderPlayerChip, renderProfilePicker, loadProfileChoice, saveProfileChoice } from '../shared/identity.js';
+import { colorHex } from '../shared/identity-data.js';
 
 const $ = id => document.getElementById(id);
 const client = new RuntimeClient('player');
@@ -75,14 +77,51 @@ $('join-form').hidden = !hasInvitation; $('join-heading').hidden = !hasInvitatio
 $('invitation-missing').hidden = hasInvitation;
 if (!hasInvitation) $('pack-title').textContent = 'Join the dub';
 
+const joinChoice = loadProfileChoice();
+const joinPicker = renderProfilePicker($('join-profile-picker'), { ...joinChoice, onChange: saveProfileChoice });
 $('join-form').addEventListener('submit', async event => {
   event.preventDefault(); clearNotice(); $('join-button').disabled = true;
   try {
-    await client.request('/api/join', { roomId, joinToken, nickname: $('nickname').value.trim() });
+    const { color, avatar } = joinPicker.get();
+    await client.request('/api/join', { roomId, joinToken, nickname: $('nickname').value.trim(), ...(color ? { color } : {}), ...(avatar ? { avatar } : {}) });
     await client.start();
   } catch (problem) { error(problem); }
   finally { $('join-button').disabled = false; }
 });
+let profilePicker = null; let profileEditorOpen = false;
+async function changeProfile(patch) {
+  const status = $('profile-status');
+  try { await client.request('/api/player/profile', patch); status.textContent = ''; }
+  catch (problem) {
+    if (problem.status === 409 && problem.suggestion) {
+      status.textContent = 'That color is taken, so the next free one was chosen.';
+      try { await client.request('/api/player/profile', { ...patch, color: problem.suggestion }); } catch (retry) { error(retry); }
+    } else error(problem);
+  }
+  if (client.state) render(client.state);
+}
+$('profile-toggle').addEventListener('click', () => {
+  profileEditorOpen = !profileEditorOpen;
+  $('profile-editor').hidden = !profileEditorOpen; $('profile-toggle').setAttribute('aria-expanded', String(profileEditorOpen));
+});
+function renderProfile(snapshot, visible) {
+  const { session } = snapshot; const me = session.players.find(item => item.id === snapshot.viewer.playerId);
+  $('profile-panel').hidden = !visible || !me;
+  if (!visible || !me) return;
+  $('profile-chip').replaceChildren(renderPlayerChip(me, { size: 32, label: me.nickname }));
+  const taken = new Set(session.players.filter(item => item.id !== me.id).map(item => item.color));
+  if (!profilePicker) {
+    profilePicker = renderProfilePicker($('profile-picker'), { color: me.color, avatar: me.avatar, taken, onChange: ({ color, avatar }) => {
+      const current = client.state?.session.players.find(item => item.id === client.state.viewer.playerId);
+      const patch = {}; if (color !== current?.color) patch.color = color; if ((avatar || '') !== (current?.avatar || '')) patch.avatar = avatar || '';
+      if (Object.keys(patch).length) { saveProfileChoice({ color, avatar }); changeProfile(patch); }
+    } });
+  } else profilePicker.set({ color: me.color, avatar: me.avatar, taken });
+  const roster = $('roster'); roster.replaceChildren();
+  for (const other of session.players) {
+    const chip = renderPlayerChip(other, { size: 24 }); chip.setAttribute('role', 'listitem'); chip.classList.toggle('offline', !other.connected); roster.append(chip);
+  }
+}
 function roleKey(snapshot) {
   return JSON.stringify([snapshot.session.id, snapshot.session.matchId, snapshot.session.pack?.id, snapshot.viewer.playerId, snapshot.session.settings?.gameMode, [...(snapshot.queue?.assignedCharacters || [])].sort(), [...(snapshot.queue?.lines || [])]]);
 }
@@ -250,6 +289,8 @@ function render(snapshot) {
   $('recording-microphone-help').hidden = !recording || microphoneReady();
   $('playback-panel').hidden = !finalPlayback;
   $('waiting-panel').hidden = showRoles || recording || finalPlayback;
+  renderProfile(snapshot, !recording && !finalPlayback);
+  $('recording-panel').style.setProperty('--chip', colorHex(player?.color));
   const showLineNavigation = hasTasks && ['recording', 'review', 'paused'].includes(session.state);
   $('line-navigation').hidden = !showLineNavigation;
   const picker = $('line-picker'); const selectedWasFocused = document.activeElement === picker;

@@ -2,9 +2,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { COLOR_IDS, MARKERS, isAvatarId, isColorId } from "../../web/shared/identity-data.js";
 
 export function randomId(bytes = 18) { return randomBytes(bytes).toString("base64url"); }
 export function fail(message, status = 400) { const error = new Error(message); error.status = status; throw error; }
+export function validNickname(nickname) {
+  if (typeof nickname !== "string" || nickname.trim().length < 1 || nickname.trim().length > 40 || /[\u0000-\u001f\u007f]/.test(nickname)) fail("Nickname must be 1–40 printable characters");
+  return nickname.trim();
+}
 const record = value => Object.assign(Object.create(null), value);
 const publicPack = pack => pack ? ({
   id: pack.id, metadata: pack.metadata, videoUrl: pack.videoUrl, backingTrackUrl: pack.backingTrackUrl,
@@ -134,7 +139,7 @@ export class SessionStore extends EventEmitter {
   snapshot(viewer) {
     const lineTakes = record({});
     for (const [lineId, take] of Object.entries(this.data.lineTakes)) {
-      lineTakes[lineId] = { id: take.id, playerId: take.playerId, character: take.character, startTime: take.startTime, endTime: take.endTime, status: take.status, url: "/takes/" + take.id, leadIn: take.leadIn || 0, tail: take.tail || 0 };
+      lineTakes[lineId] = { id: take.id, playerId: take.playerId, character: take.character, startTime: take.startTime, endTime: take.endTime, status: take.status, url: "/takes/" + take.id, leadIn: take.leadIn || 0, tail: take.tail || 0, recorder: take.recorder ?? null };
     }
     const replacementTakes = record({});
     if (viewer.kind === "player") for (const [lineId, take] of Object.entries(this.data.replacementTakes)) {
@@ -145,7 +150,7 @@ export class SessionStore extends EventEmitter {
       .map(retake => ({ lineId: retake.lineId, playerId: retake.playerId, nickname: this.findPlayer(retake.playerId)?.nickname || "Player", startedAt: retake.startedAt }));
     const players = this.data.players.map(player => {
       const queue = this.queue(player.id);
-      return { id: player.id, nickname: player.nickname, connected: (this.connections.get(player.id) ?? 0) > 0, ready: !!this.data.readyPlayers[player.id], assignedCharacters: queue.assignedCharacters, progress: { currentQueueIndex: queue.currentQueueIndex, totalAssignedLines: queue.lines.length, completedLines: queue.completedLines.length, pendingLines: queue.pendingLines.length } };
+      return { id: player.id, nickname: player.nickname, color: player.color, marker: this.markerFor(player), avatar: player.avatar, connected: (this.connections.get(player.id) ?? 0) > 0, ready: !!this.data.readyPlayers[player.id], assignedCharacters: queue.assignedCharacters, progress: { currentQueueIndex: queue.currentQueueIndex, totalAssignedLines: queue.lines.length, completedLines: queue.completedLines.length, pendingLines: queue.pendingLines.length } };
     });
     const session = {
       id: this.data.id, partyCreated: this.data.partyCreated, matchId: this.data.matchId,
@@ -235,14 +240,64 @@ export class SessionStore extends EventEmitter {
     this.data.options = { ...this.data.options, ...options };
     if (!this.data.options.allowMultipleRoles && this.data.options.maxRolesPerPlayer > 1) this.data.options.maxRolesPerPlayer = 1;
   }
-  join({ roomId, joinToken, nickname }) {
+  // Colors are unique while the palette lasts. Once every color is taken, the
+  // least-used color is reused and a pattern marker keeps players apart.
+  colorUsage() {
+    const usage = new Map(COLOR_IDS.map(id => [id, 0]));
+    for (const player of this.data.players) usage.set(player.color, (usage.get(player.color) ?? 0) + 1);
+    return usage;
+  }
+  freeColor(preferred, excludePlayerId = null) {
+    const used = new Set(this.data.players.filter(player => player.id !== excludePlayerId).map(player => player.color));
+    if (preferred && !used.has(preferred)) return preferred;
+    const free = COLOR_IDS.find(id => !used.has(id));
+    if (free) return free;
+    const usage = this.colorUsage();
+    if (excludePlayerId) { const own = this.findPlayer(excludePlayerId); if (own) usage.set(own.color, usage.get(own.color) - 1); }
+    return COLOR_IDS.reduce((best, id) => usage.get(id) < usage.get(best) ? id : best, COLOR_IDS[0]);
+  }
+  markerFor(player) {
+    const sharing = this.data.players.filter(other => other.color === player.color);
+    return MARKERS[sharing.indexOf(player) % MARKERS.length];
+  }
+  join({ roomId, joinToken, nickname, color, avatar }) {
     if (roomId !== this.data.id || joinToken !== this.data.joinToken) fail("Invalid room or join token", 403);
     if (!this.data.partyCreated) fail("The host has not created a party", 409);
     if (!["lobby", "assignment"].includes(this.data.state) || this.data.rolesLocked) fail("This game has started. Ask the host for help", 409);
-    if (typeof nickname !== "string" || nickname.trim().length < 1 || nickname.trim().length > 40 || /[\u0000-\u001f\u007f]/.test(nickname)) fail("Nickname must be 1–40 printable characters");
-    const player = { id: randomId(), token: randomId(32), nickname: nickname.trim(), connected: false };
+    const name = validNickname(nickname);
+    if (color !== undefined && !isColorId(color)) fail("Unknown color");
+    if (avatar !== undefined && avatar !== "" && !isAvatarId(avatar)) fail("Unknown avatar");
+    // A taken color on join falls back to the first free one instead of failing the join.
+    const player = { id: randomId(), token: randomId(32), nickname: name, connected: false, color: this.freeColor(color), avatar: avatar || null };
     this.data.players.push(player);
     return player;
+  }
+  updateProfile(playerId, { nickname, color, avatar }) {
+    const player = this.findPlayer(playerId);
+    if (!player) fail("Unknown player", 404);
+    if (this.data.state === "playback") fail("Profiles cannot change during playback", 409);
+    const next = { nickname: player.nickname, color: player.color, avatar: player.avatar };
+    if (nickname !== undefined) next.nickname = validNickname(nickname);
+    if (avatar !== undefined) {
+      if (avatar !== "" && !isAvatarId(avatar)) fail("Unknown avatar");
+      next.avatar = avatar || null;
+    }
+    if (color !== undefined) {
+      if (!isColorId(color)) fail("Unknown color");
+      const others = this.data.players.filter(other => other.id !== playerId);
+      const taken = others.some(other => other.color === color);
+      // Sharing is only allowed once no free color remains.
+      if (taken && COLOR_IDS.some(id => !others.some(other => other.color === id))) {
+        const error = new Error("That color is taken"); error.status = 409; error.suggestion = this.freeColor(null, playerId); throw error;
+      }
+      next.color = color;
+    }
+    Object.assign(player, next);
+    // Accepted takes keep the profile captured at accept time (take.recorder).
+  }
+  recorderOf(playerId) {
+    const player = this.findPlayer(playerId);
+    return player ? { id: player.id, nickname: player.nickname, color: player.color, avatar: player.avatar } : null;
   }
   assign(character, playerId) {
     if (this.data.options.gameMode !== "character") fail("Character assignment is unavailable in Line mode", 409);
@@ -435,7 +490,7 @@ export class SessionStore extends EventEmitter {
   }
   acceptAll() {
     if (!["recording", "review"].includes(this.data.state)) fail("Cannot accept takes in this phase", 409);
-    for (const take of Object.values(this.data.lineTakes)) if (take.status === "recorded") take.status = "accepted";
+    for (const take of Object.values(this.data.lineTakes)) if (take.status === "recorded") { take.status = "accepted"; take.recorder = this.recorderOf(take.playerId); }
     this.completionPhase();
   }
   requireOwner(playerId, lineId) {
@@ -514,7 +569,7 @@ export class SessionStore extends EventEmitter {
       const accepted = this.data.lineTakes[lineId];
       if (accepted?.status !== "accepted" || accepted.id !== active.acceptedTakeId) fail("Accepted take changed during retake", 409);
       if (!candidate || candidate.retakeId !== retakeId || candidate.playerId !== playerId || candidate.id !== takeId || candidate.acceptedTakeId !== accepted.id) fail("Replacement take changed; reload before accepting", 409);
-      this.data.lineTakes[lineId] = { ...candidate, status: "accepted" };
+      this.data.lineTakes[lineId] = { ...candidate, status: "accepted", recorder: this.recorderOf(candidate.playerId) };
       delete this.data.replacementTakes[lineId];
       delete this.data.activeRetakes[lineId];
       this.completionPhase();
@@ -527,6 +582,7 @@ export class SessionStore extends EventEmitter {
       if (take.id !== takeId) fail("Take changed; reload before accepting", 409);
     }
     take.status = "accepted";
+    take.recorder = this.recorderOf(take.playerId);
     this.completionPhase();
   }
   retake(lineId) {

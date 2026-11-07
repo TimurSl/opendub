@@ -1,6 +1,6 @@
 # Gameplay and library roadmap
 
-Status: **plan, not implemented**. This document covers six features:
+Status: **in progress**. See [Implementation status](#implementation-status) for what has shipped. This document covers six features:
 
 1. [Avatars and colors](#1-avatars-and-colors)
 2. [Dub library (automatic save of every game)](#2-dub-library)
@@ -10,6 +10,14 @@ Status: **plan, not implemented**. This document covers six features:
 6. [Handicaps and cards](#6-handicaps-and-cards)
 
 Each section builds on the current architecture in [DESIGN.md](DESIGN.md): one in-memory party in `server/session/store.js`, full-state WebSocket snapshots, one ownership function (`ownerForLine`), and a single FFmpeg export in `server/index.js`.
+
+## Implementation status
+
+| Phase | Work | Status |
+| --- | --- | --- |
+| 1 | §1 Avatars and colors | **Done** |
+
+Deviations from the plan are noted in each section as they are implemented.
 
 ---
 
@@ -100,6 +108,15 @@ Today, voice effects other than Custom run in the browser (an AudioWorklet), and
 - A profile change during recording keeps the old color on existing accepted takes.
 
 **Size:** small. **Do this first**, because every later feature shows players.
+
+**Implemented.** Notes on how the plan was realised:
+
+- Allowlists live in `web/shared/identity-data.js`, imported by both the server (validation) and the browser (rendering). Colors are sent as ids and mapped to hex on the client, so no free text reaches CSS. A test checks every color keeps 3:1 contrast on `#121212` and `#ffffff`.
+- Past 12 players, the least-used color is reused and the snapshot's `players[].marker` (`dot`, then `stripe`) tells clients which pattern to draw. Taking a color someone else holds is a 409 only while a free color exists.
+- Joining with a taken color does not fail; the server picks the first free one.
+- Taken-color 409 responses carry `suggestion`, and the client retries with it automatically.
+- The line picker is not colored per owner: a player only ever sees their own lines, so the recording panel gets a top border in the player's color instead. The host's line-assignment rows show each owner's chip.
+- Review-waveform coloring is not done yet, because review waveforms are host-side only today.
 
 ---
 

@@ -161,3 +161,12 @@ h2 { margin-bottom: 22px; font-size: clamp(28px, 4vw, 42px); font-weight: 550; l
 .soundpad-import { display: flex; justify-content: center; margin: 12px auto 4px; }
 .soundpad-import button { min-height: 43px; padding: 8px 20px; font-size: 13px; white-space: nowrap; }
 .soundpad-help { text-align: center; margin: 0 auto 14px; font-size: 12px; max-width: 620px; }
+
+.profile-fieldset { margin: 14px 0; padding: 0; border: 0; }
+.profile-fieldset legend { padding: 0; font-weight: 650; }
+.profile-panel { margin: 0 0 18px; }
+.profile-me { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.profile-me button { min-height: 44px; padding: 8px 14px; }
+.roster { display: flex; flex-wrap: wrap; gap: 8px; }
+.roster .player-chip.offline { opacity: .5; }
+.recording-panel { border-top: 4px solid var(--chip, transparent); padding-top: 10px; }

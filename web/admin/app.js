@@ -3,6 +3,8 @@ import { DubPlayback } from '../playback/playback.js';
 import { filterPacks } from './pack-filters.js';
 import { PendingButtons } from './pending-buttons.js';
 import { currentStage, maxViewableStage, reconcileStage } from './stage.js';
+import { renderPlayerChip } from '../shared/identity.js';
+import { colorHex } from '../shared/identity-data.js';
 
 const $ = id => document.getElementById(id);
 const client = new RuntimeClient('admin');
@@ -585,18 +587,18 @@ function renderRoles(session, lineMode, allAssigned) {
 function fillPlayerOptions(select, session) {
   select.replaceChildren();
   const empty = node('option', '— Nobody —'); empty.value = ''; select.append(empty);
-  for (const player of session.players) { const option = node('option', `${player.nickname}${player.connected ? '' : ' (offline)'}`); option.value = player.id; select.append(option); }
+  for (const player of session.players) { const option = node('option', `● ${player.nickname}${player.connected ? '' : ' (offline)'}`); option.value = player.id; option.style.color = colorHex(player.color); select.append(option); }
 }
 function renderAssignmentRows(containerId, session) {
   const container = $(containerId); const pack = session.pack;
   let view = roleViews.get(containerId);
   if (!view) { view = new Map(); roleViews.set(containerId, view); }
-  const rosterKey = JSON.stringify(session.players.map(player => [player.id, player.nickname, player.connected]));
+  const rosterKey = JSON.stringify(session.players.map(player => [player.id, player.nickname, player.connected, player.color, player.marker, player.avatar]));
   for (const character of pack.characters) {
     let row = view.get(character);
     if (!row) {
       const element = node('div', undefined, 'role-row'); const info = node('div', undefined, 'role-info');
-      const name = node('strong', character); const status = node('small'); info.append(name, status);
+      const name = node('strong', character); const owner = node('span', undefined, 'role-owner'); const status = node('small'); info.append(name, owner, status);
       const select = node('select'); select.setAttribute('aria-label', `Player for ${character}`);
       select.addEventListener('change', () => {
         const path = select.value ? 'assign' : 'unassign';
@@ -604,14 +606,16 @@ function renderAssignmentRows(containerId, session) {
         quietly(action(path, body, select, undefined, `role:${character}`));
       });
       select.addEventListener('blur', () => { if (client.state) renderAssignmentRows(containerId, client.state.session); });
-      element.append(info, select); container.append(element); row = { element, name, status, select, rosterKey: null }; view.set(character, row);
+      element.append(info, select); container.append(element); row = { element, name, owner: owner, status, select, rosterKey: null, ownerKey: null }; view.set(character, row);
     }
     if (row.rosterKey !== rosterKey && document.activeElement !== row.select) { fillPlayerOptions(row.select, session); row.rosterKey = rosterKey; }
     const ownerId = session.roleAssignments[character]; const owner = session.players.find(player => player.id === ownerId);
     const lines = pack.lines.filter(line => line.character === character);
     const accepted = lines.filter(line => session.lineTakes[line.id]?.status === 'accepted').length;
     const progress = session.recordingStarted ? ` · ${accepted}/${lines.length} accepted` : ` · ${plural(lines.length, 'line')}`;
-    row.status.textContent = owner ? `${owner.nickname}${owner.connected ? '' : ' (offline)'}${owner.ready && session.state === 'assignment' ? ' · ready' : ''}${progress}` : `No player yet${progress}`;
+    const ownerKey = owner ? `${owner.id}:${owner.nickname}:${owner.color}:${owner.marker}:${owner.avatar}` : '';
+    if (row.ownerKey !== ownerKey) { row.ownerKey = ownerKey; row.owner.replaceChildren(...(owner ? [renderPlayerChip(owner, { size: 20 })] : [])); }
+    row.status.textContent = owner ? `${owner.connected ? 'Online' : 'Offline'}${owner.ready && session.state === 'assignment' ? ' · ready' : ''}${progress}` : `No player yet${progress}`;
     if (document.activeElement !== row.select) row.select.value = ownerId || '';
     if (!pendingButtons.has(row.select)) row.select.disabled = session.state === 'playback' || session.state === 'lobby' || !session.players.length;
     row.element.classList.toggle('is-free', !owner);
@@ -622,7 +626,7 @@ function renderLineAssignmentRows(containerId, session) {
   const container = $(containerId); const pack = session.pack;
   let view = roleViews.get(containerId);
   if (!view) { view = new Map(); roleViews.set(containerId, view); }
-  const rosterKey = JSON.stringify(session.players.map(player => [player.id, player.nickname, player.connected]));
+  const rosterKey = JSON.stringify(session.players.map(player => [player.id, player.nickname, player.connected, player.color, player.marker, player.avatar]));
   // Outside role selection only unfinished lines are worth moving.
   const onlyOpen = containerId !== 'line-assignments';
   for (const [index, line] of pack.lines.entries()) {
@@ -631,16 +635,18 @@ function renderLineAssignmentRows(containerId, session) {
       const element = node('div', undefined, 'role-row line-assignment-row'); const info = node('div', undefined, 'role-info');
       const name = node('strong', `#${index + 1} · ${line.character}`); const caption = node('small', line.caption.length > 90 ? `${line.caption.slice(0, 87)}…` : line.caption);
       caption.title = line.caption;
-      const status = node('small'); info.append(name, caption, status);
+      const ownerChip = node('span', undefined, 'role-owner'); const status = node('small'); info.append(name, caption, ownerChip, status);
       const select = node('select'); select.setAttribute('aria-label', `Player for line ${index + 1}, ${line.character}`);
       select.addEventListener('change', () => quietly(action('assign-line', { lineId: line.id, playerId: select.value }, select, undefined, `line:${line.id}`)));
       select.addEventListener('blur', () => { if (client.state) renderLineAssignmentRows(containerId, client.state.session); });
-      element.append(info, select); container.append(element); row = { element, name, caption, status, select, rosterKey: null }; view.set(line.id, row);
+      element.append(info, select); container.append(element); row = { element, name, caption, owner: ownerChip, status, select, rosterKey: null, ownerKey: null }; view.set(line.id, row);
     }
     if (row.rosterKey !== rosterKey && document.activeElement !== row.select) { fillPlayerOptions(row.select, session); row.rosterKey = rosterKey; }
     const ownerId = session.lineAssignments?.[line.id] || ''; const owner = session.players.find(player => player.id === ownerId);
     const take = session.lineTakes[line.id];
-    row.status.textContent = `${owner ? `${owner.nickname}${owner.connected ? '' : ' (offline)'}` : 'No player yet'} · ${take?.status === 'accepted' ? 'accepted' : take?.status === 'recorded' ? 'needs review' : 'no take yet'}`;
+    const lineOwnerKey = owner ? `${owner.id}:${owner.nickname}:${owner.color}:${owner.marker}:${owner.avatar}` : '';
+    if (row.ownerKey !== lineOwnerKey) { row.ownerKey = lineOwnerKey; row.owner.replaceChildren(...(owner ? [renderPlayerChip(owner, { size: 20 })] : [])); }
+    row.status.textContent = `${owner ? (owner.connected ? 'Online' : 'Offline') : 'No player yet'} · ${take?.status === 'accepted' ? 'accepted' : take?.status === 'recorded' ? 'needs review' : 'no take yet'}`;
     if (document.activeElement !== row.select) row.select.value = ownerId;
     if (!pendingButtons.has(row.select)) row.select.disabled = !session.players.length || ['lobby', 'playback'].includes(session.state);
     row.element.classList.toggle('is-free', !owner);
@@ -668,7 +674,7 @@ function renderPlayers(containerId, session) {
     const row = node('article', undefined, 'player-row');
     row.classList.toggle('is-offline', !player.connected);
     const heading = node('div', undefined, 'player-heading');
-    heading.append(node('strong', player.nickname), node('span', player.connected ? 'Online' : 'Offline', player.connected ? 'presence connected' : 'presence'));
+    heading.append(renderPlayerChip(player, { size: 28 }), node('span', player.connected ? 'Online' : 'Offline', player.connected ? 'presence connected' : 'presence'));
     const progress = node('progress'); progress.max = Math.max(1, player.progress.totalAssignedLines); progress.value = player.progress.completedLines;
     progress.setAttribute('aria-label', `${player.nickname}: ${player.progress.completedLines} of ${player.progress.totalAssignedLines} lines accepted`);
     const [statusText, statusClass] = playerStatus(player, session, lineMode);

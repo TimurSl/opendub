@@ -1,4 +1,5 @@
 import { node, mediaWarning } from '../shared/api.js';
+import { renderPlayerChip } from '../shared/identity.js';
 
 // A source receives one AudioContext start command; overlapping windows naturally mix.
 export function audioWindow(startTime, duration, bufferDuration, position, contextStart) {
@@ -8,6 +9,19 @@ export function audioWindow(startTime, duration, bufferDuration, position, conte
   return { when: contextStart + Math.max(0, startTime - position), offset, duration: remaining };
 }
 
+// The accepted take that is speaking at `timeline` seconds (latest-starting wins
+// when lines overlap). Uses the recorder profile captured when the take was
+// accepted, so later profile edits do not rewrite history.
+export function speakerAt(session, timeline) {
+  let found = null;
+  for (const line of session?.pack?.lines ?? []) {
+    const take = session.lineTakes?.[line.id];
+    if (take?.status !== 'accepted' || !take.recorder) continue;
+    if (timeline >= line.startTime && timeline <= line.endTime + (take.tail || 0) && (!found || line.startTime >= found.line.startTime)) found = { line, take };
+  }
+  return found ? { recorder: found.take.recorder, character: found.take.character } : null;
+}
+
 export class DubPlayback {
   constructor(root, client, onError, { player = false } = {}) {
     this.client = client; this.onError = onError; this.player = player; this.context = null; this.buffers = new Map();
@@ -15,6 +29,7 @@ export class DubPlayback {
     this.playIntent = false; this.playCommand = 0; this.failedKey = null; this.reportedFailedKey = null;
     this.video = node('video'); this.video.muted = true; this.video.playsInline = true; this.video.preload = 'metadata';
     this.video.setAttribute('aria-label', 'Finished dub visuals');
+    this.speaker = node('div', undefined, 'speaker-badge'); this.speaker.hidden = true; this.speaker.setAttribute('aria-live', 'off');
     this.actions = node('div', undefined, 'actions');
     this.status = node('p', player ? '' : 'Load a pack to prepare playback.', 'recorder-status'); this.status.setAttribute('role', 'status');
     if (player) {
@@ -24,7 +39,7 @@ export class DubPlayback {
         if (this.runningId || this.playIntent) this.pausePlayer();
         else this.playPlayer().catch(() => {});
       });
-      this.actions.append(this.playButton); root.append(this.video, this.actions, this.status);
+      this.actions.append(this.playButton); root.append(this.video, this.speaker, this.actions, this.status);
       this.video.addEventListener('error', () => {
         this.videoFailed = true;
         this.suppressedId = this.session?.playback?.id; this.playIntent = false; this.stop();
@@ -38,7 +53,7 @@ export class DubPlayback {
     this.prepareButton = node('button', 'Prepare playback', 'secondary');
     this.resumeButton = node('button', 'Enable audio / catch up', 'secondary'); this.resumeButton.hidden = true;
     this.stopButton = node('button', 'Stop on this device', 'secondary'); this.stopButton.disabled = true;
-    this.actions.append(this.prepareButton, this.resumeButton, this.stopButton); root.append(this.warning, this.video, this.actions, this.status);
+    this.actions.append(this.prepareButton, this.resumeButton, this.stopButton); root.append(this.warning, this.video, this.speaker, this.actions, this.status);
     this.prepareButton.addEventListener('click', () => this.prepare().catch(onError));
     this.resumeButton.addEventListener('click', () => this.resume().catch(onError));
     this.stopButton.addEventListener('click', () => { this.suppressedId = this.session?.playback?.id; this.stop(); this.status.textContent = 'Stopped on this device. Click Enable audio / catch up to rejoin.'; this.resumeButton.hidden = !this.session?.playback; });
@@ -308,6 +323,7 @@ export class DubPlayback {
       if (this.runningId !== playback.id) return;
       const timeline = context.currentTime - anchor;
       if (timeline >= Math.max(finish, Number.isFinite(this.video.duration) ? this.video.duration : 0)) { this.suppressedId = playback.id; this.playIntent = false; this.stop(); this.status.textContent = this.player ? 'Movie finished.' : 'Playback finished.'; return; }
+      this.showSpeaker(timeline >= 0 ? timeline : null);
       if (timeline < 0) this.status.textContent = this.player ? 'Starting soon…' : `Shared playback starts in ${Math.ceil(-timeline)} seconds…`;
       else {
         this.status.textContent = this.player ? '' : 'Playing the completed dub.';
@@ -326,6 +342,13 @@ export class DubPlayback {
     };
     this.frame = requestAnimationFrame(step);
   }
+  showSpeaker(timeline) {
+    const current = timeline == null ? null : speakerAt(this.session, timeline);
+    const key = current ? `${current.recorder.id}:${current.recorder.nickname}:${current.recorder.color}:${current.recorder.avatar}:${current.character}` : '';
+    if (this.speakerKey === key) return;
+    this.speakerKey = key; this.speaker.replaceChildren(); this.speaker.hidden = !current;
+    if (current) this.speaker.append(renderPlayerChip(current.recorder, { size: 32, label: `${current.recorder.nickname} · ${current.character}` }));
+  }
   schedule(buffer, window) {
     if (!window) return;
     const source = this.context.createBufferSource(); source.buffer = buffer; source.connect(this.context.destination);
@@ -333,7 +356,7 @@ export class DubPlayback {
   }
   stop() {
     cancelAnimationFrame(this.frame); this.sources.forEach(source => { try { source.stop(); } catch {} source.disconnect(); });
-    this.sources = []; this.runningId = null; this.video.pause();
+    this.sources = []; this.runningId = null; this.video.pause(); this.showSpeaker(null);
     if (this.player) this.updatePlayerControls(); else this.stopButton.disabled = true;
   }
 }

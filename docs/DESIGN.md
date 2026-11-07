@@ -67,6 +67,9 @@ Session = {
 
 Player = {
   id, nickname, connected, assignedCharacters: [],
+  color, // palette id from web/shared/identity-data.js; unique while the 12-color palette lasts
+  marker, // 'none' | 'dot' | 'stripe': distinguishes players who must share a color
+  avatar, // built-in icon id (web/shared/avatars/<id>.svg) or null for initials
   progress: {
     currentQueueIndex: 0,
     totalAssignedLines: 0,
@@ -84,6 +87,7 @@ PlayerQueue = {
 Take = {
   id, matchId, playerId, character, startTime, endTime,
   status: 'recorded', // accepted after explicit acceptance
+  recorder, // { id, nickname, color, avatar } captured at accept time, so restyling never rewrites history
   retakeId, acceptedTakeId, lineVersion, // replacement identity fields when applicable
   url // authenticated URL; private storage metadata is server-only
 };
@@ -116,7 +120,8 @@ All mutation requests are JSON except multipart take uploads. Errors return `{ "
 | `POST /api/admin/accept` | `{lineId, matchId}` | Accepts an uploaded take after host review |
 | `POST /api/admin/playback` | `{allowMissing, matchId}` | Starts playback; missing accepted takes require explicit override |
 | `POST /api/admin/stop-playback` | `{matchId}` | Returns to recording/review |
-| `POST /api/join` | `{roomId, joinToken, nickname}` | Joins the party by stable ID, before or during its lobby; returns player state |
+| `POST /api/join` | `{roomId, joinToken, nickname, color?, avatar?}` | Joins the party by stable ID, before or during its lobby; returns player state. A taken color falls back to the first free one; unknown colors or avatars are rejected |
+| `POST /api/player/profile` | `{nickname?, color?, avatar?}` (no `matchId`) | Restyles the player in any state except playback. `avatar: ""` clears it. A color another player holds answers 409 with `suggestion` (the next free color) while a free color exists |
 | `POST /api/player/claim` / `release` | `{character, matchId}` | Claims or releases a character during assignment |
 | `POST /api/player/ready` | `{ready, matchId}` | Sets readiness for the current match |
 | `POST /api/takes/:lineId/retake` | `{matchId, attemptId?}` | Starts one active player replacement retake; returns an opaque `retakeId` bound to the player, match, line version, and accepted take. Retrying the same `attemptId` recovers that ID; a competing attempt is rejected |

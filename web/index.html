@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#121212">
   <title>Open Dub</title>
   <link rel="stylesheet" href="/player/styles.css">
+  <link rel="stylesheet" href="/shared/identity.css">
 </head>
 <body>
   <a href="#stage" class="skip-link">Skip to recording</a>
@@ -21,10 +22,19 @@
       <form id="join-form" class="join-form">
         <label for="nickname">Your name</label>
         <input id="nickname" name="nickname" autocomplete="nickname" maxlength="40" aria-describedby="notice" required>
+        <fieldset class="profile-fieldset"><legend>Your look</legend><div id="join-profile-picker"></div></fieldset>
         <button id="join-button" type="submit">JOIN</button>
       </form>
     </section>
     <div id="room-panel" hidden>
+      <section id="profile-panel" class="profile-panel" hidden aria-label="Players">
+        <div class="profile-me"><span id="profile-chip"></span><button id="profile-toggle" type="button" class="secondary" aria-expanded="false" aria-controls="profile-editor">EDIT LOOK</button></div>
+        <div id="profile-editor" class="profile-editor" hidden>
+          <div id="profile-picker"></div>
+          <p id="profile-status" class="help" role="status" aria-live="polite"></p>
+        </div>
+        <div id="roster" class="roster" role="list" aria-label="Players in the party"></div>
+      </section>
       <section id="role-panel" class="roles-screen" hidden aria-labelledby="role-title">
         <div class="section-intro"><p class="eyebrow">ASSIGNMENT</p><h2 id="role-title" tabindex="-1">Choose your characters</h2><p id="role-help">Choose at least one character, then check your microphone.</p><p id="role-counts" class="role-counts" aria-live="polite"></p></div>
         <div id="character-options" class="character-options" role="list" aria-label="Pack characters"></div>

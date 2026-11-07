@@ -391,7 +391,7 @@ export async function createRuntime(options = {}) {
   adminAction("playback", { allowMissing: "boolean" }, ({ allowMissing }) => store.startPlayback(allowMissing));
   adminAction("stop-playback", {}, () => store.stopPlayback());
   app.post("/api/join", async (req, res) => {
-    const body = validateBody(req, { roomId: "string", joinToken: "string", nickname: "string" });
+    const body = validateBody(req, { roomId: "string", joinToken: "string", nickname: "string", color: "string?", avatar: "string?" });
     const player = await store.mutate(() => store.join(body));
     setCookie(req, res, "dub_player", player.token);
     res.json({ ...store.snapshot({ kind: "player", playerId: player.id }), token: player.token });
@@ -402,6 +402,13 @@ export async function createRuntime(options = {}) {
       store.requireMatch(body.matchId);
       return operation(body, req.viewer.playerId);
     });
+    snapshot(req, res);
+  });
+  // Profiles are not match-scoped: players can restyle themselves in the lobby
+  // before any pack is chosen. A taken color answers 409 with the next free one.
+  app.post("/api/player/profile", authenticated("player"), async (req, res) => {
+    const body = validateBody(req, { nickname: "string?", color: "string?", avatar: "string?" });
+    await store.mutate(() => store.updateProfile(req.viewer.playerId, body));
     snapshot(req, res);
   });
   playerAction("claim", { character: "string" }, ({ character }, playerId) => store.claimRole(character, playerId));
@@ -645,7 +652,7 @@ export async function createRuntime(options = {}) {
     if (error instanceof multer.MulterError) status = error.code === "LIMIT_FILE_SIZE" ? 413 : 400;
     if (error.type === "entity.parse.failed") status = 400;
     if (status >= 500) console.error(error);
-    res.status(status).json({ error: status >= 500 ? "Runtime could not complete the request" : error.message });
+    res.status(status).json({ error: status >= 500 ? "Runtime could not complete the request" : error.message, ...(status === 409 && error.suggestion ? { suggestion: error.suggestion } : {}) });
   });
   const tlsCert = options.tlsCert ?? process.env.TLS_CERT;
   const tlsKey = options.tlsKey ?? process.env.TLS_KEY;

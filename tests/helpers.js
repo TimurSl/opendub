@@ -97,9 +97,9 @@ export async function startFixtureRuntime(t, options = {}) {
     if (selected.status !== 200) throw new Error(`Cannot select fixture pack: ${JSON.stringify(selected.data)}`);
     return selected.data;
   }
-  async function join(session, nickname) {
+  async function join(session, nickname, extra = {}) {
     const result = await request('/api/join', {
-      method: 'POST', body: { roomId: session.id, joinToken: session.joinToken, nickname },
+      method: 'POST', body: { roomId: session.id, joinToken: session.joinToken, nickname, ...extra },
     });
     if (result.status !== 200) throw new Error(`Cannot join fixture room: ${JSON.stringify(result.data)}`);
     const cookie = result.response.headers.get('set-cookie')?.split(';')[0];

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { audioWindow, DubPlayback } from '../web/playback/playback.js';
+import { audioWindow, speakerAt, DubPlayback } from '../web/playback/playback.js';
 
 function close(actual, expected) {
   assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} != ${expected}`);
@@ -52,6 +52,7 @@ function playerHarness(t, { fetcher, initialContextState = 'suspended', player =
   class Element extends EventTarget {
     constructor(tag) { super(); this.tagName = tag; this.children = []; this.attributes = {}; this.readyState = 1; this.duration = 20; this.currentTime = 0; }
     append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = [...children]; }
     setAttribute(name, value) { this.attributes[name] = value; }
     removeAttribute(name) { delete this.attributes[name]; }
     canPlayType() { return ''; }
@@ -98,7 +99,7 @@ function playerHarness(t, { fetcher, initialContextState = 'suspended', player =
 
 test('player viewer exposes one accessible control and preloads quietly before audio is unlocked', async (t) => {
   const { playback, root, fetched, state } = playerHarness(t);
-  assert.deepEqual(root.children.map(child => child.tagName), ['video', 'div', 'p']);
+  assert.deepEqual(root.children.map(child => child.tagName), ['video', 'div', 'div', 'p']); // video, speaker badge (not a control), actions, status
   assert.equal(playback.actions.children.length, 1);
   assert.equal(playback.playButton.textContent, 'PLAY');
   assert.equal(playback.playButton.attributes['aria-pressed'], 'false');
@@ -224,4 +225,21 @@ test('take overlapping the beginning of a pack discards negative-time audio', ()
   close(clip.when, 10);
   close(clip.offset, 0.22);
   close(clip.duration, 2.65);
+});
+
+test('speakerAt names the recorder captured at accept time, preferring the latest-starting overlapping line', () => {
+  const session = {
+    pack: { lines: [{ id: 'a', startTime: 1, endTime: 5 }, { id: 'b', startTime: 3, endTime: 4 }] },
+    lineTakes: {
+      a: { status: 'accepted', character: 'Alice', tail: 0.5, recorder: { id: 'p1', nickname: 'Old name', color: 'red', avatar: null } },
+      b: { status: 'accepted', character: 'Bob', tail: 0, recorder: { id: 'p2', nickname: 'Bea', color: 'blue', avatar: 'cat' } },
+    },
+  };
+  assert.equal(speakerAt(session, 0.5), null);
+  assert.equal(speakerAt(session, 2).recorder.nickname, 'Old name');
+  assert.equal(speakerAt(session, 3.5).character, 'Bob');
+  assert.equal(speakerAt(session, 5.4).character, 'Alice'); // tail keeps the speaker visible
+  assert.equal(speakerAt(session, 6), null);
+  session.lineTakes.b.status = 'recorded';
+  assert.equal(speakerAt(session, 3.5).character, 'Alice');
 });
