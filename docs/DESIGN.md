@@ -145,8 +145,8 @@ All mutation requests are JSON except multipart take uploads. Errors return `{ "
 | `GET /takes/:takeId` | — | Authenticated accepted take or candidate; a replacement candidate is visible only to its owning player |
 | `POST /api/admin/deal-lines` (modes) | `{matchId}` | In Line mode shuffles and deals; in Duet pairs two players per character and alternates its lines; in Relay hands each character over every `rules.relayEvery` lines. Result is `lineAssignments`, editable with `assign-line` |
 | `POST /api/player/open-line` | `{lineId, matchId}` | Speed rounds: starts the server clock for the caller's line (idempotent); uploads before it or after its deadline answer 409. Clocks appear in `session.lineClocks` |
-| `POST /api/player/redub-vote` | `{lineId, vote, matchId}` | Ask (or stop asking) to redub an accepted clip; at most 5 requests per player; recording, review and reveal only. `session.redubVotes` is `{count, mine}` for players and `{count, voters}` for the host |
-| `POST /api/admin/clear-redub` | `{lineId, matchId}` | Host dismisses a clip's requests |
+| `POST /api/player/pack-vote` | `{packId, vote}` (no `matchId`) | Players vote for the pack to dub while the host is choosing (lobby). One vote each; another pack moves it; `vote: false` withdraws. `session.packChoices` lists the installed packs in the lobby and `session.packVotes` is `{packId: {count, mine, voters}}`; votes are cleared when a pack is selected |
+| `GET /api/packs/:id/icon` | — | Pack icon for any party member (the admin route stays for the host) |
 | `GET /api/admin/cards` | — | `{decks, limits, ffmpeg}`. The deck store (`<data dir>/cards/decks.json`) starts with one empty deck |
 | `POST /api/admin/cards` / `PATCH` / `DELETE /api/admin/cards/:id` | `{deckId, card}` / `{card}` | Add, edit, delete one card (validated by `validateCard`). Not match-scoped |
 | `POST /api/admin/cards/batch` | `{format: 'json' \| 'text', content, deckId \| newDeckName, dryRun?, skipInvalid?}` | Batch add. `dryRun` previews every row; saving is all-or-nothing for the confirmed rows. Up to 200 cards, 400 KB |
@@ -207,7 +207,7 @@ Final playback preloads the backing track and accepted takes, decodes them into 
 
 The host broadcasts one future playback epoch. Browsers estimate their offset to the server clock, preload audio, and schedule a common start. Late joiners enter at the elapsed timeline time. Network timing affects when a browser begins watching, never where a take belongs in the dub. This is best-effort shared playback, not sample-perfect synchronization between devices.
 
-## Modes, cards and redub requests
+## Modes, cards and pack votes
 
 `rules` also holds `relayEvery`, `speed: {enabled, lineTimeLimitSec}`, `mystery` and `cards: {enabled, deckId, deal, kinds}`. Speed forces `takeLimit: 1` and `allowPlayerRetakes: false`. `session.settings.assignmentStyle` is `line` for Line, Duet and Relay (ownership in `lineAssignments`) and `character` otherwise; clients use it instead of `gameMode`.
 

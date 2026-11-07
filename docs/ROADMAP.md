@@ -339,9 +339,9 @@ The options combine. For example, `caption + reference` gives an improv round, a
 
 ---
 
-## Also shipped: clip grid and redub requests
+## Also shipped: pack grid and pack votes
 
-Not in the original plan. The host's Review screen shows every clip in a **grid** (or the old list, switchable). Players see every accepted clip on their own screen and can **ask to redub** it (up to 5 requests each, `POST /api/player/redub-vote`). The host sees an avatar and name beside each requested clip, and clips with more requests move to the top of both layouts (`web/shared/clips.js`). Requests are cleared when the clip is redubbed (host retake or accepted replacement), dismissed by the host (`clear-redub`), or the match ends.
+Not in the original plan. The host's pack chooser (step 1) is a **grid** of the packs downloaded from the Workshop. While the host is choosing, players see the same packs on their own screens and **vote** for the one they want to dub (`POST /api/player/pack-vote`, party-level, one vote each; picking another pack moves the vote). The host sees each voter's avatar and name on the pack, and packs with more votes move to the top of the grid (`rankPacks` in `web/shared/clips.js`, also used for the players' list). Votes are cleared when the host chooses a pack. Pack icons are served to party members at `GET /api/packs/:id/icon`.
 
 ## 6. Handicaps and cards
 

@@ -151,7 +151,7 @@
           <p class="muted">A party gives you an invitation link. Players can join right away and stay for every match you run tonight; you pick the pack afterwards.</p>
           <button id="create-party" type="button">Create party</button>
         </div>
-        <div id="pack-heading" class="section-heading" hidden><div><h2>Choose a pack</h2><p class="muted">Pick the scene to dub in the next match.</p></div><div class="heading-actions"><button id="back-to-setup" class="secondary" type="button" hidden>Back to setup</button><button id="refresh-packs" class="secondary" type="button">Refresh packs</button></div></div>
+        <div id="pack-heading" class="section-heading" hidden><div><h2>Choose a pack</h2><p class="muted">Pick the scene to dub in the next match. Packs players voted for are shown first.</p></div><div class="heading-actions"><button id="back-to-setup" class="secondary" type="button" hidden>Back to setup</button><button id="refresh-packs" class="secondary" type="button">Refresh packs</button></div></div>
         <details id="workshop-panel" class="workshop-panel" hidden>
           <summary>Download a pack from Steam Workshop</summary>
           <form id="workshop-form">
@@ -279,13 +279,8 @@
           <div class="section-heading"><div><p class="eyebrow">REVIEW</p><h2>Check the takes</h2><p id="review-summary" class="muted"></p></div>
             <label for="line-filter" class="filter-label">Show <select id="line-filter"><option value="all">All lines</option><option value="recorded">Needs review</option><option value="pending">Missing</option><option value="accepted">Accepted</option></select></label>
           </div>
-          <div class="review-toolbar">
-            <p class="help">Listen to each take. <strong>Accept</strong> keeps it; <strong>Redub</strong> deletes it and sends the line back to its player. Clips players asked to redub move to the top.</p>
-            <div class="view-toggle" role="group" aria-label="Clip layout"><button id="view-grid" type="button" class="secondary" aria-pressed="true">Grid</button><button id="view-list" type="button" class="secondary" aria-pressed="false">List</button></div>
-          </div>
-          <p id="redub-summary" class="notice" role="status" hidden></p>
-          <div id="clip-grid" class="clip-grid"></div>
-          <div id="takes" class="take-list" hidden></div>
+          <p class="help">Listen to each take. <strong>Accept</strong> keeps it; <strong>Ask for retake</strong> deletes it and sends the line back to its player.</p>
+          <div id="takes" class="take-list"></div>
           <p id="takes-empty" class="muted empty-filter" hidden>No lines match this filter.</p>
         </section>
         <section id="review-line-reassignment" class="panel" hidden>

@@ -7,8 +7,7 @@ import { renderPlayerChip } from '../shared/identity.js';
 import { initLibrary } from './library.js';
 import { colorHex } from '../shared/identity-data.js';
 import { initCards, describeCard, cardKindLabel } from './cards.js';
-import { createClipGrid, voterNodes, votersKey } from './clips.js';
-import { clipOrder, requestSummary } from '../shared/clips.js';
+import { rankPacks } from '../shared/clips.js';
 
 const $ = id => document.getElementById(id);
 const client = new RuntimeClient('admin');
@@ -352,13 +351,15 @@ function characterSummary(characters, counts) {
 }
 function renderPackList(force = false) {
   const session = client.state?.session;
-  const key = JSON.stringify([session?.partyCreated, session?.state, session?.matchId, session?.pack?.id, pendingActionPaths.has('select'), activePackList.map(pack => pack.id)]);
+  const key = JSON.stringify([session?.partyCreated, session?.state, session?.matchId, session?.pack?.id, pendingActionPaths.has('select'), activePackList.map(pack => pack.id), session?.packVotes, session?.players?.map(player => [player.id, player.nickname, player.color, player.marker, player.avatar])]);
   if (!force && key === renderedPackListKey) return;
   renderedPackListKey = key;
   const container = $('packs'); container.replaceChildren();
   const minimum = filterNumber('pack-min-characters'); const maximum = filterNumber('pack-max-characters');
   const title = $('pack-search').value;
-  const filtered = filterPacks(activePackList, { title, minimum, maximum });
+  // Packs players voted for come first, most votes on top; the rest keep their order.
+  const votes = session?.packVotes || {};
+  const filtered = rankPacks(filterPacks(activePackList, { title, minimum, maximum }), votes).map(item => item.pack);
   $('pack-result-count').textContent = filtered.length === activePackList.length ? plural(activePackList.length, 'pack') : `Showing ${filtered.length} of ${plural(activePackList.length, 'pack')}`;
   $('clear-pack-filters').disabled = !title.trim() && minimum === null && maximum === null;
   if (!activePackList.length) {
@@ -384,6 +385,12 @@ function renderPackList(force = false) {
     const counts = pack.characters.map((character, index) => pack.characterLineCounts?.[index] ?? 0);
     body.append(node('p', `${(metadata.authors || []).join(', ') || 'Unknown authors'} · ${plural(pack.lineCount ?? 0, 'line')} · ${plural(characterCount, 'character')}`, 'muted'));
     body.append(node('p', characterSummary(pack.characters, counts), 'help'));
+    const asked = votes[pack.id];
+    if (asked?.count) {
+      const box = node('div', undefined, 'pack-votes'); box.append(node('span', `${plural(asked.count, 'vote')}`, 'pack-vote-count'));
+      for (const id of asked.voters) { const voter = session.players.find(player => player.id === id); if (voter) box.append(renderPlayerChip(voter, { size: 22 })); }
+      body.append(box); row.classList.add('has-votes');
+    }
     const select = node('button', selecting ? 'Selecting…' : isCurrent ? 'Open setup' : 'Use this pack');
     select.type = 'button';
     if (isCurrent) select.className = 'secondary';
@@ -465,9 +472,7 @@ function nextStepText(session, progressStage) {
     case 5: {
       const toReview = Object.values(session.lineTakes).filter(take => take.status === 'recorded').length;
       const missing = session.totalLineCount - session.completedLineCount - toReview;
-      const asked = requestSummary(session.redubVotes);
       if (session.state === 'reveal' && session.cards?.guessing?.open) return 'Players are guessing each other\'s cards. Close guessing when they are done, then start the final playback.';
-      if (asked.clips && !toReview) return `Players asked to redub ${plural(asked.clips, 'clip')}. They are at the top of the list. Redub the ones you agree with, or start the final playback.`;
       if (toReview) return `Listen to ${plural(toReview, 'take')} waiting for review and accept or retake them.`;
       if (missing) return `${plural(missing, 'line')} have no take yet. Continue recording, or play without them.`;
       return 'Every line is accepted. Start the final playback for everyone!';
@@ -486,7 +491,7 @@ function renderAdmin(snapshot) {
   viewedStage = reconcileStage(viewedStage, previousProgressStage, progressStage, partyChanged || matchChanged, maxStage);
   previousProgressStage = progressStage;
   if (partyChanged || matchChanged) {
-    roleViews.clear(); takeRows.clear(); clipGrid.reset(); cardOverviewKeys.clear();
+    roleViews.clear(); takeRows.clear(); cardOverviewKeys.clear();
     [...ASSIGNMENT_CONTAINERS, 'takes'].forEach(id => $(id).replaceChildren());
     $('export-status').textContent = ''; settingsMessage = SETTINGS_HINT;
   }
@@ -954,8 +959,7 @@ function renderReview(session) {
 async function askRetake(line, index, button) {
   const state = client.state?.session; if (!state) return;
   const owner = state.players.find(player => player.id === lineOwnerId(state, line));
-  const asked = state.redubVotes?.[line.id]?.count ?? 0;
-  if (!window.confirm(`Delete this take of line #${index + 1} (${line.character}) and ask ${owner?.nickname || 'its player'} to record it again?${asked ? `\n\n${plural(asked, 'player')} asked for this redub.` : ''}${state.state === 'review' ? '\n\nRecording reopens for this line.' : ''}`)) return;
+  if (!window.confirm(`Delete this take of line #${index + 1} (${line.character}) and ask ${owner?.nickname || 'its player'} to record it again?${state.state === 'review' ? '\n\nRecording reopens for this line.' : ''}`)) return;
   const fromStage = viewedStage ?? currentStage(state);
   try {
     await action('retake', { lineId: line.id }, button, 'Deleting…', `retake:${line.id}`);
@@ -965,40 +969,12 @@ async function askRetake(line, index, button) {
   } catch {}
 }
 const canRetakeLine = (line, take) => !!take || !!client.state?.session.lineClocks?.[line.id];
-const clipGrid = createClipGrid({
-  container: $('clip-grid'),
-  isPending: button => pendingButtons.has(button),
-  onAccept: (line, button) => quietly(action('accept', { lineId: line.id }, button, 'Accepting…', `accept:${line.id}`)),
-  onRedub: askRetake,
-  onClear: (line, button) => quietly(action('clear-redub', { lineId: line.id }, button, 'Clearing…', `clear:${line.id}`)),
-});
-let clipView = 'grid';
-try { if (localStorage.getItem('open-dub-clip-view') === 'list') clipView = 'list'; } catch { /* the grid is the default */ }
-function setClipView(view) {
-  clipView = view;
-  try { localStorage.setItem('open-dub-clip-view', view); } catch { /* optional convenience */ }
-  rerender();
-}
-$('view-grid').addEventListener('click', () => setClipView('grid'));
-$('view-list').addEventListener('click', () => setClipView('list'));
-// Both layouts show the same clips. Redub requests rank clips (most requests first) in either one.
 function renderClips(session) {
-  const pack = session.pack; if (!pack) return;
-  const grid = clipView === 'grid';
-  $('clip-grid').hidden = !grid; $('takes').hidden = grid;
-  $('view-grid').setAttribute('aria-pressed', String(grid)); $('view-list').setAttribute('aria-pressed', String(!grid));
-  const asked = requestSummary(session.redubVotes);
-  $('redub-summary').hidden = !asked.clips;
-  $('redub-summary').textContent = asked.clips ? `Players asked to redub ${plural(asked.clips, 'clip')} (${plural(asked.requests, 'request')}). The most requested clips are at the top.` : '';
-  const filter = $('line-filter').value;
-  const visible = grid
-    ? clipGrid.render(session, { filter, ownerOf: line => session.players.find(player => player.id === lineOwnerId(session, line)), canRetake: canRetakeLine })
-    : renderTakes(session, filter);
-  $('takes-empty').hidden = visible > 0;
+  if (!session.pack) return;
+  $('takes-empty').hidden = renderTakes(session, $('line-filter').value) > 0;
 }
 function renderTakes(session, filter) {
   const pack = session.pack;
-  const order = clipOrder(pack.lines, session.redubVotes);
   let visible = 0;
   for (const [index, line] of pack.lines.entries()) {
     let row = takeRows.get(line.id);
@@ -1007,19 +983,16 @@ function renderTakes(session, filter) {
       const titleRow = node('div', undefined, 'take-title'); const title = node('strong'); const badge = node('span', '', 'badge');
       titleRow.append(title, badge);
       const status = node('small'); const caption = node('p');
-      const requests = node('div', undefined, 'clip-requests'); const requestLabel = node('span', undefined, 'clip-request-count'); const voters = node('span', undefined, 'clip-voters'); requests.append(requestLabel, voters);
-      description.append(titleRow, status, caption, requests);
+      description.append(titleRow, status, caption);
       const audio = node('audio'); audio.controls = true; audio.preload = 'none'; audio.setAttribute('aria-label', `Play take for line ${index + 1}`);
       const placeholder = node('span', 'No take yet', 'take-placeholder');
       const actions = node('div', undefined, 'take-actions');
       const accept = node('button', 'Accept'); accept.type = 'button';
-      const retake = node('button', 'Redub', 'secondary'); retake.type = 'button';
-      const clear = node('button', 'Dismiss requests', 'link-button'); clear.type = 'button';
+      const retake = node('button', 'Ask for retake', 'secondary'); retake.type = 'button';
       accept.addEventListener('click', () => quietly(action('accept', { lineId: line.id }, accept, 'Accepting…', `accept:${line.id}`)));
       retake.addEventListener('click', () => askRetake(line, index, retake));
-      clear.addEventListener('click', () => quietly(action('clear-redub', { lineId: line.id }, clear, 'Clearing…', `clear:${line.id}`)));
-      actions.append(accept, retake, clear); element.append(description, audio, placeholder, actions); $('takes').append(element);
-      row = { element, title, badge, status, caption, audio, placeholder, accept, retake, clear, requests, requestLabel, voters, votersKey: null, takeId: null }; takeRows.set(line.id, row);
+      actions.append(accept, retake); element.append(description, audio, placeholder, actions); $('takes').append(element);
+      row = { element, title, badge, status, caption, audio, placeholder, accept, retake, takeId: null }; takeRows.set(line.id, row);
     }
     const take = session.lineTakes[line.id];
     const owner = session.players.find(player => player.id === lineOwnerId(session, line));
@@ -1037,15 +1010,9 @@ function renderTakes(session, filter) {
     row.accept.hidden = take?.status !== 'recorded';
     if (!pendingButtons.has(row.accept)) row.accept.disabled = !['recording', 'review'].includes(session.state);
     row.element.classList.toggle('is-blind', !!session.blindLines?.[line.id]);
-    const votes = session.redubVotes?.[line.id]; const count = votes?.count ?? 0;
-    row.requests.hidden = !count; row.requestLabel.textContent = count ? plural(count, 'redub request') : '';
-    const key = votersKey(votes, session.players);
-    if (row.votersKey !== key) { row.votersKey = key; row.voters.replaceChildren(...voterNodes(votes, session.players)); }
-    row.clear.hidden = !count; row.element.classList.toggle('has-requests', count > 0);
-    row.retake.hidden = !canRetakeLine(line, take); row.retake.textContent = take?.status === 'accepted' ? 'Redub' : 'Ask for retake';
+    row.retake.hidden = !canRetakeLine(line, take); row.retake.textContent = 'Ask for retake';
     if (!pendingButtons.has(row.retake)) row.retake.disabled = session.state === 'playback';
     row.element.dataset.status = status;
-    row.element.style.order = String(order.get(line.id));
     row.element.hidden = filter !== 'all' && status !== filter;
     if (!row.element.hidden) visible++;
   }

@@ -1,6 +1,6 @@
 import { node } from '../shared/api.js';
 import { renderPlayerChip } from '../shared/identity.js';
-import { rankClips } from '../shared/clips.js';
+import { rankPacks } from '../shared/clips.js';
 
 const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
 const KIND = { performance: 'Performance', effect: 'Voice effect', constraint: 'Rule' };
@@ -70,44 +70,45 @@ export function renderCards(session, selectedLineId, elements) {
   }));
 }
 
-// Redub requests: every accepted clip, most requested first. Tiles are updated in place so audio keeps playing.
-export function createRedubGrid({ container, onVote }) {
+// Pack votes: the packs installed on the host, most voted first. Tiles are updated in place.
+export function createPackVoteGrid({ container, onVote }) {
   const tiles = new Map();
-  function build(line) {
-    const element = node('article', undefined, 'redub-tile');
-    const head = node('div', undefined, 'redub-head'); const title = node('strong'); const count = node('span', undefined, 'redub-count'); head.append(title, count);
-    const caption = node('p', undefined, 'redub-caption');
-    const audio = node('audio'); audio.controls = true; audio.preload = 'none';
-    const button = node('button', 'ASK TO REDUB', 'redub-button'); button.type = 'button'; button.setAttribute('aria-pressed', 'false');
-    button.addEventListener('click', () => onVote(line.id, button.getAttribute('aria-pressed') !== 'true', button));
-    element.append(head, caption, audio, button);
-    const tile = { element, title, count, caption, audio, button, takeId: null };
-    tiles.set(line.id, tile); container.append(element);
+  function build(pack) {
+    const element = node('article', undefined, 'pack-tile');
+    const art = node('div', undefined, 'pack-art');
+    if (pack.hasIcon) { const image = node('img'); image.alt = ''; image.loading = 'lazy'; image.src = `/api/packs/${encodeURIComponent(pack.id)}/icon`; art.append(image); }
+    else art.append(node('span', 'OD'));
+    const title = node('strong', pack.title); const meta = node('p', undefined, 'pack-meta'); const votes = node('div', undefined, 'pack-voters');
+    const button = node('button', 'VOTE', 'pack-vote-button'); button.type = 'button'; button.setAttribute('aria-pressed', 'false');
+    button.addEventListener('click', () => onVote(pack.id, button.getAttribute('aria-pressed') !== 'true', button));
+    element.append(art, title, meta, votes, button);
+    const tile = { element, title, meta, votes, button, votersKey: null };
+    tiles.set(pack.id, tile); container.append(element);
     return tile;
   }
   return {
     reset() { tiles.clear(); container.replaceChildren(); },
-    render(session, { busy = new Set() } = {}) {
-      const pack = session.pack; if (!pack) return 0;
-      const votes = session.redubVotes || {}; const ranked = rankClips(pack.lines, votes);
-      let shown = 0;
-      ranked.forEach(({ line, index, count }, rank) => {
-        const take = session.lineTakes[line.id]; const accepted = take?.status === 'accepted';
-        const tile = tiles.get(line.id) ?? build(line);
-        tile.element.hidden = !accepted; if (!accepted) return;
-        shown++;
-        tile.title.textContent = `LINE ${index + 1} · ${line.character}`;
-        tile.count.textContent = count ? plural(count, 'request') : '';
-        tile.caption.textContent = line.captionHidden ? '' : line.caption;
-        tile.caption.hidden = !!line.captionHidden;
-        if (tile.takeId !== take.id) { tile.takeId = take.id; tile.audio.pause(); tile.audio.src = take.url; }
-        const mine = !!votes[line.id]?.mine;
-        tile.button.setAttribute('aria-pressed', String(mine)); tile.button.textContent = mine ? 'REQUESTED · TAKE BACK' : 'ASK TO REDUB';
-        tile.button.disabled = busy.has(line.id);
-        tile.element.classList.toggle('is-requested', mine); tile.element.classList.toggle('has-requests', count > 0);
+    render(session, { busy = false, selectedId = null } = {}) {
+      const choices = session.packChoices || []; const votes = session.packVotes || {};
+      const live = new Set(choices.map(pack => pack.id));
+      for (const [id, tile] of tiles) if (!live.has(id)) { tile.element.remove(); tiles.delete(id); }
+      rankPacks(choices, votes).forEach(({ pack, count }, rank) => {
+        const tile = tiles.get(pack.id) ?? build(pack);
+        tile.title.textContent = pack.title;
+        tile.meta.textContent = `${plural(pack.lineCount, 'line')} · ${plural(pack.characters.length, 'character')}${pack.authors.length ? ` · ${pack.authors.join(', ')}` : ''}`;
+        const key = JSON.stringify([count, votes[pack.id]?.voters, session.players.map(player => [player.id, player.nickname, player.color, player.marker, player.avatar])]);
+        if (tile.votersKey !== key) {
+          tile.votersKey = key; tile.votes.replaceChildren();
+          if (count) tile.votes.append(node('span', plural(count, 'vote'), 'pack-vote-count'));
+          for (const id of votes[pack.id]?.voters ?? []) { const voter = session.players.find(player => player.id === id); if (voter) tile.votes.append(renderPlayerChip(voter, { size: 20 })); }
+        }
+        const mine = !!votes[pack.id]?.mine;
+        tile.button.setAttribute('aria-pressed', String(mine)); tile.button.textContent = mine ? 'YOUR VOTE · TAKE BACK' : 'VOTE FOR THIS';
+        tile.button.disabled = busy;
+        tile.element.classList.toggle('is-mine', mine); tile.element.classList.toggle('has-votes', count > 0); tile.element.classList.toggle('is-chosen', pack.id === selectedId);
         tile.element.style.order = String(rank);
       });
-      return shown;
+      return choices.length;
     },
   };
 }

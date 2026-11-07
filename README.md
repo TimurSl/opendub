@@ -66,7 +66,7 @@ Typical host workflow:
 
 **Cards.** The **Cards** menu in the top bar manages challenge cards. Nothing is included: add cards one at a time (**Add one card**), or paste many in **Batch add** as JSON or as `Title | Text` lines, preview which rows are valid, then import. Cards can be performance (honour system), effect (an allowlisted FFmpeg chain the server applies to every take, needs FFmpeg) or constraint (hidden caption, original or scene, or a take limit). Turn cards on in match setup, choose the deck and whether to deal per player, line or character; the host can re-deal before recording and veto during it. Players see only their own card. In the reveal, per-player cards are guessed from a shortlist before you turn them face up; scores are saved in the library entry.
 
-**Clips and redub requests.** Review shows every clip as a grid (or list). Players can ask to redub any accepted clip from their own screen (up to five clips each); you see who asked beside the clip, and the most requested clips move to the top. Press **Redub** on a clip to send it back to its player.
+**Pack grid and votes.** The pack chooser is a grid of the packs you downloaded from the Workshop. While you choose, players see the same packs on their screens and can vote for the one they want to dub (one vote each, changeable). You see who voted beside each pack, and the most voted packs move to the top.
 
 Match setup also has a **Take limit per line** (0 for unlimited; 1 gives one take per line, enforced by the server) and a switch for **Players may retake**.
 

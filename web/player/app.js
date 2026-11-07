@@ -5,7 +5,7 @@ import { canRecordSelectedLine } from './eligibility.js';
 import { roleView } from './view-state.js';
 import { renderPlayerChip, renderProfilePicker, loadProfileChoice, saveProfileChoice } from '../shared/identity.js';
 import { colorHex } from '../shared/identity-data.js';
-import { modeBadges, speedState, renderCards, createRedubGrid, renderCardReveal } from './extras.js';
+import { modeBadges, speedState, renderCards, createPackVoteGrid, renderCardReveal } from './extras.js';
 
 const $ = id => document.getElementById(id);
 const client = new RuntimeClient('player');
@@ -298,22 +298,22 @@ async function changeRole(character, action) {
     if (client.state) render(client.state);
   }
 }
-// ---- speed rounds, redub requests and card guesses
+// ---- speed rounds, pack votes and card guesses
 let guessBusy = false; let speedTick = null; let lastSpeedPhase = null;
-const redubBusy = new Set();
-const redubGrid = createRedubGrid({ container: $('redub-grid'), onVote: voteRedub });
+let voteBusy = false;
+const packGrid = createPackVoteGrid({ container: $('pack-vote-grid'), onVote: votePack });
 recorder.onSaved = () => {
   // A speed round accepts the take as soon as it is saved: one take, no review.
   if (client.state?.session.rules?.speed?.enabled && !recorder.retakeId) recorder.next().catch(error);
 };
-async function voteRedub(lineId, vote, button) {
-  if (redubBusy.has(lineId)) return;
-  redubBusy.add(lineId); button.disabled = true; $('redub-status').textContent = '';
-  try { await client.request('/api/player/redub-vote', { lineId, vote }); }
+async function votePack(packId, vote) {
+  if (voteBusy) return;
+  voteBusy = true; $('pack-vote-status').textContent = ''; if (client.state) render(client.state);
+  try { await client.request('/api/player/pack-vote', { packId, vote }); }
   catch (problem) {
-    $('redub-status').textContent = problem.status === 409 || problem.status === 400 ? problem.message : friendlyMessage(problem);
-    if (problem.status === 409 || problem.status === 403) await client.refresh().catch(() => {});
-  } finally { redubBusy.delete(lineId); if (client.state) render(client.state); }
+    $('pack-vote-status').textContent = problem.status === 409 || problem.status === 400 ? problem.message : friendlyMessage(problem);
+    if (problem.status === 409) await client.refresh().catch(() => {});
+  } finally { voteBusy = false; if (client.state) render(client.state); }
 }
 async function guessCard(targetPlayerId, cardId) {
   if (guessBusy) return;
@@ -350,7 +350,7 @@ function render(snapshot) {
   if (roomId && session.id !== roomId) return;
   if (currentMatchId !== session.matchId) {
     currentMatchId = session.matchId; selectedLineId = null; preparedRoles = null; rolesFingerprint = null;
-    rolePending.clear(); readinessGeneration++; redubGrid.reset(); redubBusy.clear();
+    rolePending.clear(); readinessGeneration++; packGrid.reset();
   }
   const player = session.players.find(item => item.id === snapshot.viewer.playerId);
   const currentRoleKey = roleKey(snapshot);
@@ -395,9 +395,9 @@ function render(snapshot) {
   $('mode-badges').hidden = !badges.length || finalPlayback; $('mode-badges').textContent = badges.join('  ·  ');
   renderCards(session, selectedLineId, { panel: $('card-panel'), summary: $('card-summary'), body: $('card-body') });
   if (finalPlayback) $('card-panel').hidden = true;
-  const redubShown = redubGrid.render(session, { busy: redubBusy });
-  const redubVisible = !recording && !showRoles && !finalPlayback && ['recording', 'paused', 'review', 'reveal'].includes(session.state) && redubShown > 0;
-  $('redub-panel').hidden = !redubVisible; $('waiting-panel').classList.toggle('compact', redubVisible);
+  const packVoteShown = packGrid.render(session, { busy: voteBusy, selectedId: pack?.id });
+  const packVoteVisible = session.state === 'lobby' && packVoteShown > 0;
+  $('pack-vote-panel').hidden = !packVoteVisible; $('waiting-panel').classList.toggle('compact', packVoteVisible);
   renderProfile(snapshot, !recording && !finalPlayback);
   renderExports(snapshot, !recording);
   $('recording-panel').style.setProperty('--chip', colorHex(player?.color));

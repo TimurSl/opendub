@@ -17,8 +17,7 @@ export function validNickname(nickname) {
 }
 const record = value => Object.assign(Object.create(null), value);
 // Per-match state added by the later roadmap phases. Cleared whenever a match starts or ends.
-export const REDUB_VOTE_LIMIT = 5;
-const MATCH_RECORDS = ["redubVotes", "lineClocks", "cardGuesses"];
+const MATCH_RECORDS = ["packVotes", "lineClocks", "cardGuesses"];
 const SPEED_GRACE_MS = 3000;
 const matchExtras = () => ({ cards: null, cardsOpen: false, ...Object.fromEntries(MATCH_RECORDS.map(key => [key, record({})])) });
 const publicPack = pack => pack ? ({
@@ -246,7 +245,8 @@ export class SessionStore extends EventEmitter {
       settings: { ...this.settings, ...this.data.options, assignmentStyle: this.lineStyle() ? "line" : "character" },
       rules: this.data.rules,
       takesUsed: this.takesUsed(viewer),
-      redubVotes: this.redubView(viewer),
+      packChoices: this.packChoices(),
+      packVotes: this.packVotesView(viewer),
       lineClocks: this.clocksView(viewer),
       cards: this.cardsView(viewer),
       exports: this.exportsView ? this.exportsView(viewer) : [],
@@ -711,7 +711,6 @@ export class SessionStore extends EventEmitter {
       this.data.lineTakes[lineId] = { ...candidate, status: "accepted", recorder: this.recorderOf(candidate.playerId) };
       delete this.data.replacementTakes[lineId];
       delete this.data.activeRetakes[lineId];
-      delete this.data.redubVotes[lineId]; // the clip was redubbed: its requests are answered
       this.completionPhase();
       return;
     }
@@ -738,7 +737,6 @@ export class SessionStore extends EventEmitter {
       this.data.cardsOpen = false;
       this.data.state = "recording";
     }
-    delete this.data.redubVotes[lineId];
     delete this.data.lineClocks[lineId];
     return previous;
   }
@@ -789,30 +787,33 @@ export class SessionStore extends EventEmitter {
     }
     return view;
   }
-  // ------------------------------------------------------------ redub requests
-  // Players ask to have an accepted clip dubbed again. Votes order the host's clip lists.
-  setRedubVote(playerId, lineId, vote) {
-    if (!this.findPlayer(playerId)) fail("Unknown player", 404);
-    this.line(lineId);
-    if (typeof vote !== "boolean") fail("Invalid vote");
-    if (!["recording", "review", "reveal"].includes(this.data.state)) fail("Redub requests are open while the takes are being reviewed", 409);
-    if (this.data.lineTakes[lineId]?.status !== "accepted") fail("Only accepted clips can be redubbed", 409);
-    const voters = this.data.redubVotes[lineId] ?? [];
-    if (voters.includes(playerId) === vote) return;
-    if (vote) {
-      const used = Object.values(this.data.redubVotes).filter(list => list.includes(playerId)).length;
-      if (used >= REDUB_VOTE_LIMIT) fail(`You can ask to redub at most ${REDUB_VOTE_LIMIT} clips. Take one request back first`, 409);
-      this.data.redubVotes[lineId] = [...voters, playerId];
-    } else if (voters.length > 1) this.data.redubVotes[lineId] = voters.filter(id => id !== playerId);
-    else delete this.data.redubVotes[lineId];
+  // ------------------------------------------------------------ pack votes
+  // While the host is choosing, players see the installed packs and vote for the one they want to dub.
+  // One vote each (picking another pack moves it). Votes are cleared when a pack is chosen.
+  packChoices() {
+    if (!this.data.partyCreated || this.data.state !== "lobby") return [];
+    return [...this.packs.values()].map(pack => ({
+      id: pack.id, title: pack.metadata.title || pack.id, authors: pack.metadata.authors ?? [], language: pack.metadata.language ?? "",
+      lineCount: pack.lines.length, characters: pack.characters, characterLineCounts: pack.characterLineCounts, hasIcon: !!pack.icon,
+    }));
   }
-  clearRedubVotes(lineId) { this.line(lineId); delete this.data.redubVotes[lineId]; }
-  redubView(viewer) {
+  setPackVote(playerId, packId, vote) {
+    if (!this.findPlayer(playerId)) fail("Unknown player", 404);
+    if (typeof vote !== "boolean") fail("Invalid vote");
+    if (!this.data.partyCreated || this.data.state !== "lobby") fail("Votes are open while the host is choosing a pack", 409);
+    if (!this.packs.has(packId)) fail("Unknown pack", 404);
+    for (const [id, voters] of Object.entries(this.data.packVotes)) {
+      const rest = voters.filter(voter => voter !== playerId);
+      if (rest.length) this.data.packVotes[id] = rest; else delete this.data.packVotes[id];
+    }
+    if (vote) this.data.packVotes[packId] = [...(this.data.packVotes[packId] ?? []), playerId];
+  }
+  packVotesView(viewer) {
     const view = record({});
-    for (const [lineId, voters] of Object.entries(this.data.redubVotes)) {
+    for (const [packId, voters] of Object.entries(this.data.packVotes)) {
       const known = voters.filter(id => this.findPlayer(id));
-      if (!known.length) continue;
-      view[lineId] = viewer.kind === "admin" ? { count: known.length, voters: known } : { count: known.length, mine: known.includes(viewer.playerId) };
+      if (!known.length || !this.packs.has(packId)) continue;
+      view[packId] = { count: known.length, mine: viewer.kind === "player" && known.includes(viewer.playerId), voters: known };
     }
     return view;
   }

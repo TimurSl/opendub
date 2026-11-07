@@ -289,7 +289,14 @@ export async function createRuntime(options = {}) {
     })();
     res.status(202).json({ job });
   });
-  app.get("/api/admin/packs/:packId/icon", authenticated("admin"), async (req, res) => {
+  // Players vote while the host is still choosing, so this is party-level: no match id.
+  app.post("/api/player/pack-vote", authenticated("player"), async (req, res) => {
+    const { packId, vote } = validateBody(req, { packId: "string", vote: "boolean" });
+    await store.mutate(() => store.setPackVote(req.viewer.playerId, packId, vote));
+    snapshot(req, res);
+  });
+  // Pack icons are shown in the admin chooser and in the players' pack vote list.
+  const packIcon = async (req, res) => {
     const pack = store.packs.get(req.params.packId);
     if (!pack?.icon) fail("Pack icon not found", 404);
     const asset = Object.values(pack.assets).find(item => item.path === pack.icon);
@@ -298,7 +305,9 @@ export async function createRuntime(options = {}) {
     const relative = path.relative(pack.directory, real);
     if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) fail("Pack icon is outside its directory", 403);
     res.type(asset.type); res.sendFile(real, { dotfiles: "allow" });
-  });
+  };
+  app.get("/api/admin/packs/:packId/icon", authenticated("admin"), packIcon);
+  app.get("/api/packs/:packId/icon", authenticated(), packIcon);
   const adminAction = (route, shape, operation, { matchScoped = true } = {}) => app.post("/api/admin/" + route, authenticated("admin"), async (req, res) => {
     const body = validateBody(req, matchScoped ? { ...shape, matchId: "string" } : shape);
     await store.mutate(() => {
@@ -399,7 +408,6 @@ export async function createRuntime(options = {}) {
   adminAction("cards/redeal", { key: "string" }, ({ key }) => store.redealCard(key));
   adminAction("cards/veto", { key: "string", vetoed: "boolean?" }, ({ key, vetoed }) => store.vetoCard(key, vetoed ?? true));
   adminAction("cards/open", {}, () => store.openCards());
-  adminAction("clear-redub", { lineId: "string" }, ({ lineId }) => store.clearRedubVotes(lineId));
   adminAction("restart-playback", {}, () => {
     if (store.data.state !== "playback") fail("Playback is not active", 409);
     store.data.playback = { id: randomId(), startsAt: Date.now() + 5000 };
@@ -548,7 +556,6 @@ export async function createRuntime(options = {}) {
   playerAction("claim", { character: "string" }, ({ character }, playerId) => store.claimRole(character, playerId));
   playerAction("release", { character: "string" }, ({ character }, playerId) => store.releaseRole(character, playerId));
   playerAction("ready", { ready: "boolean" }, ({ ready }, playerId) => store.setPlayerReady(playerId, ready));
-  playerAction("redub-vote", { lineId: "string", vote: "boolean" }, ({ lineId, vote }, playerId) => store.setRedubVote(playerId, lineId, vote));
   playerAction("open-line", { lineId: "string" }, ({ lineId }, playerId) => store.openLine(playerId, lineId));
   playerAction("guess", { targetPlayerId: "string", cardId: "string" }, ({ targetPlayerId, cardId }, playerId) => store.guessCard(playerId, targetPlayerId, cardId));
   app.post("/api/takes/:lineId/retake", authenticated("player"), async (req, res) => {
