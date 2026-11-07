@@ -3,6 +3,9 @@ import { DubPlayback } from '../playback/playback.js';
 import { filterPacks } from './pack-filters.js';
 import { PendingButtons } from './pending-buttons.js';
 import { currentStage, maxViewableStage, reconcileStage } from './stage.js';
+import { renderPlayerChip } from '../shared/identity.js';
+import { initLibrary } from './library.js';
+import { colorHex } from '../shared/identity-data.js';
 
 const $ = id => document.getElementById(id);
 const client = new RuntimeClient('admin');
@@ -26,7 +29,7 @@ let viewedStage = null; let previousProgressStage = null; let renderedPackListKe
 let copyResetTimer = null;
 
 const STAGE_TITLES = ['Choose a pack', 'Set up the match', 'Assign roles', 'Recording', 'Review the takes', 'Final playback'];
-const PHASE_LABELS = { lobby: 'Setting up', assignment: 'Choosing roles', recording: 'Recording', paused: 'Paused', review: 'Reviewing', playback: 'Playing' };
+const PHASE_LABELS = { lobby: 'Setting up', assignment: 'Choosing roles', recording: 'Recording', paused: 'Paused', review: 'Reviewing', reveal: 'Revealing', playback: 'Playing' };
 const ASSIGNMENT_CONTAINERS = ['roles', 'recording-roles', 'line-assignments', 'recording-line-assignments', 'review-line-assignments'];
 const plural = (count, word, many = `${word}s`) => `${count} ${count === 1 ? word : many}`;
 const lineNumber = (pack, lineId) => pack.lines.findIndex(line => line.id === lineId) + 1;
@@ -39,7 +42,7 @@ function beginPending(button, label = 'Working…') {
 function endPending(button) {
   pendingButtons.finish(button, rerender);
 }
-function showLogin() { $('admin-panel').hidden = true; $('login-panel').hidden = false; }
+function showLogin() { $('admin-panel').hidden = true; $('login-panel').hidden = false; $('library-toggle').hidden = true; }
 // `key` de-duplicates repeated clicks. Per-item actions (assigning one
 // character, accepting one take) use their own key so quick changes to two
 // different rows are both sent.
@@ -150,6 +153,8 @@ function readSessionSettings() {
     referencePlaybackEnabled: $('reference-enabled').checked,
     voiceEffectsEnabled: $('effects-enabled').checked,
     compactMobilePreferred: $('compact-mobile').checked,
+    exportAccess: $('export-access').value, libraryVisibleToPlayers: $('library-visible').checked,
+    rules: { mode: $('game-mode').value, takeLimit: Number($('take-limit').value || 0), allowPlayerRetakes: $('allow-retakes').checked, blind: { caption: $('blind-caption').checked, reference: $('blind-reference').checked, scene: $('blind-scene').checked, share: Number($('blind-share').value) / 100 } },
   };
 }
 const SETTINGS_HINT = 'Changes save automatically.';
@@ -157,6 +162,10 @@ let settingsChain = Promise.resolve(); let settingsSaving = 0; let settingsMessa
 function setSettingsMessage(message) { settingsMessage = message; $('settings-status').textContent = message; }
 function saveSettings() {
   const settings = readSessionSettings();
+  if (!Number.isInteger(settings.rules.takeLimit) || settings.rules.takeLimit < 0 || settings.rules.takeLimit > 20) {
+    setSettingsMessage('Take limit must be a whole number from 0 to 20.');
+    return Promise.reject(new Error('Invalid take limit'));
+  }
   if (!Number.isInteger(settings.maxRolesPerPlayer) || settings.maxRolesPerPlayer < 0) {
     setSettingsMessage('Maximum roles must be a whole number (0 for no limit).');
     return Promise.reject(new Error('Invalid maximum roles'));
@@ -179,6 +188,7 @@ $('multiple-roles').addEventListener('change', () => {
   else if ($('max-roles').value === '1') $('max-roles').value = '0';
   updateMaxRoles();
 });
+$('blind-share').addEventListener('input', () => { $('blind-share-value').textContent = `${$('blind-share').value}%`; });
 $('game-mode').addEventListener('change', () => updateGameModeView($('game-mode').value));
 $('settings-form').addEventListener('change', () => quietly(saveSettings()));
 $('open-lobby').addEventListener('click', async () => {
@@ -217,6 +227,7 @@ async function startSharedPlayback(allowMissing, button) {
   } catch (problem) { error(problem); }
   finally { endPending(button); }
 }
+$('reveal-blind').addEventListener('click', () => quietly(action('reveal', {}, $('reveal-blind'))));
 $('review-playback').addEventListener('click', () => startSharedPlayback(false, $('review-playback')));
 $('skip-missing').addEventListener('click', () => {
   const session = client.state?.session; if (!session) return;
@@ -228,34 +239,49 @@ $('restart-playback').addEventListener('click', () => quietly(action('restart-pl
 $('stop-playback').addEventListener('click', () => quietly(action('stop-playback', {}, $('stop-playback'))));
 $('line-filter').addEventListener('change', () => { if (client.state) renderTakes(client.state.session); });
 function nextMatch(button) {
-  if (!window.confirm('Start the next match?\n\nAll takes from this match are deleted (export the video first if you want to keep it). Players stay in the party.')) return;
+  if (!window.confirm('Start the next match?\n\nThis match is saved in the library, so you can replay and export it later. Players stay in the party.')) return;
   quietly(action('next-match', {}, button));
 }
 $('next-match-review').addEventListener('click', () => nextMatch($('next-match-review')));
 $('next-match-playback').addEventListener('click', () => nextMatch($('next-match-playback')));
-$('export-video').addEventListener('click', async () => {
-  const button = $('export-video');
-  if (!beginPending(button, 'Exporting…')) return;
-  const matchId = client.state?.session.matchId;
-  $('export-status').textContent = 'Building the video and mixing accepted takes. This may take a minute…'; clearError();
+// Exports are background jobs: starting one returns immediately and progress arrives in the snapshot.
+async function startExport(button, format, label) {
+  if (!beginPending(button, 'Starting…')) return;
+  clearError();
   try {
-    const result = await client.request('/api/admin/export', {});
-    if (!matchId || client.state?.session.matchId !== matchId) {
-      $('export-status').textContent = 'The match changed while exporting. Start a new export from the current match.';
-      return;
-    }
-    const download = node('a'); download.href = result.url; download.download = result.filename;
-    document.body.append(download); download.click(); download.remove();
-    $('export-status').textContent = 'Export is ready. Your browser is downloading the MP4.';
+    await client.request('/api/exports', { format, force: true });
+    $('export-status').textContent = `${label} export started. You can leave this page; it keeps rendering.`;
   } catch (problem) { $('export-status').textContent = ''; error(problem); }
   finally { endPending(button); }
-});
+}
+$('export-video').addEventListener('click', () => startExport($('export-video'), 'mp4', 'Video'));
+$('export-audio').addEventListener('click', () => startExport($('export-audio'), 'm4a', 'Audio'));
+for (const id of ['export-access', 'library-visible']) $(id).addEventListener('change', () => quietly(saveSettings()));
+function renderExports(session) {
+  const visible = ['review', 'playback'].includes(session.state) && !!session.pack;
+  $('exports-panel').hidden = !visible;
+  if (!visible) return;
+  const settings = session.settings || {};
+  if (document.activeElement !== $('export-access')) $('export-access').value = settings.exportAccess || 'host';
+  if (document.activeElement !== $('library-visible')) $('library-visible').checked = !!settings.libraryVisibleToPlayers;
+  const list = $('export-jobs'); list.replaceChildren();
+  for (const job of (session.exports || []).filter(item => item.source === 'live')) {
+    const row = node('li', undefined, 'export-job'); row.dataset.status = job.status;
+    const label = job.format === 'mp4' ? 'Video (MP4)' : 'Audio (M4A)';
+    row.append(node('span', label, 'job-label'));
+    if (job.status === 'ready') { const link = node('a', 'Download', 'job-link'); link.href = job.url; link.download = job.filename; row.append(link); }
+    else if (job.status === 'failed') row.append(node('span', job.error || 'Export failed', 'job-error'));
+    else { const bar = node('progress'); bar.max = 1; bar.value = job.status === 'queued' ? 0 : job.progress; bar.setAttribute('aria-label', `${label} progress`); row.append(bar, node('span', job.status === 'queued' ? 'Waiting for another render' : `${Math.round(job.progress * 100)}%`, 'muted')); }
+    list.append(row);
+  }
+}
 client.addEventListener('connection', event => {
   $('connection').textContent = event.detail ? 'Connected' : 'Reconnecting…';
   $('connection').classList.toggle('is-online', !!event.detail);
   $('connection').classList.toggle('is-offline', !event.detail);
 });
-client.addEventListener('state', event => render(event.detail));
+const library = initLibrary({ client, quietly, onError: error });
+client.addEventListener('state', event => { render(event.detail); renderExports(event.detail.session); library.update(event.detail); });
 
 // ---------------------------------------------------------------- pack list
 const packFilterKey = 'open-dub-pack-filters';
@@ -515,11 +541,16 @@ function renderSetup(session) {
       'reference-enabled': settings.referencePlaybackEnabled,
       'effects-enabled': settings.voiceEffectsEnabled,
       'compact-mobile': settings.compactMobilePreferred,
+      'take-limit': session.rules?.takeLimit ?? 0,
+      'blind-caption': session.rules?.blind?.caption, 'blind-reference': session.rules?.blind?.reference, 'blind-scene': session.rules?.blind?.scene,
+      'blind-share': Math.round((session.rules?.blind?.share ?? 1) * 100),
+      'allow-retakes': session.rules?.allowPlayerRetakes ?? true,
     };
     for (const [id, value] of Object.entries(values)) {
       const input = $(id);
       if (document.activeElement === input) continue;
       if (id === 'game-mode') input.value = value;
+      else if (id === 'take-limit' || id === 'blind-share') { input.value = String(value); if (id === 'blind-share') $('blind-share-value').textContent = `${value}%`; }
       else if (id === 'max-roles') { input.value = String(value ?? 0); input.max = String(pack.characters.length); }
       else input.checked = !!value;
     }
@@ -585,18 +616,18 @@ function renderRoles(session, lineMode, allAssigned) {
 function fillPlayerOptions(select, session) {
   select.replaceChildren();
   const empty = node('option', '— Nobody —'); empty.value = ''; select.append(empty);
-  for (const player of session.players) { const option = node('option', `${player.nickname}${player.connected ? '' : ' (offline)'}`); option.value = player.id; select.append(option); }
+  for (const player of session.players) { const option = node('option', `● ${player.nickname}${player.connected ? '' : ' (offline)'}`); option.value = player.id; option.style.color = colorHex(player.color); select.append(option); }
 }
 function renderAssignmentRows(containerId, session) {
   const container = $(containerId); const pack = session.pack;
   let view = roleViews.get(containerId);
   if (!view) { view = new Map(); roleViews.set(containerId, view); }
-  const rosterKey = JSON.stringify(session.players.map(player => [player.id, player.nickname, player.connected]));
+  const rosterKey = JSON.stringify(session.players.map(player => [player.id, player.nickname, player.connected, player.color, player.marker, player.avatar]));
   for (const character of pack.characters) {
     let row = view.get(character);
     if (!row) {
       const element = node('div', undefined, 'role-row'); const info = node('div', undefined, 'role-info');
-      const name = node('strong', character); const status = node('small'); info.append(name, status);
+      const name = node('strong', character); const owner = node('span', undefined, 'role-owner'); const status = node('small'); info.append(name, owner, status);
       const select = node('select'); select.setAttribute('aria-label', `Player for ${character}`);
       select.addEventListener('change', () => {
         const path = select.value ? 'assign' : 'unassign';
@@ -604,14 +635,16 @@ function renderAssignmentRows(containerId, session) {
         quietly(action(path, body, select, undefined, `role:${character}`));
       });
       select.addEventListener('blur', () => { if (client.state) renderAssignmentRows(containerId, client.state.session); });
-      element.append(info, select); container.append(element); row = { element, name, status, select, rosterKey: null }; view.set(character, row);
+      element.append(info, select); container.append(element); row = { element, name, owner: owner, status, select, rosterKey: null, ownerKey: null }; view.set(character, row);
     }
     if (row.rosterKey !== rosterKey && document.activeElement !== row.select) { fillPlayerOptions(row.select, session); row.rosterKey = rosterKey; }
     const ownerId = session.roleAssignments[character]; const owner = session.players.find(player => player.id === ownerId);
     const lines = pack.lines.filter(line => line.character === character);
     const accepted = lines.filter(line => session.lineTakes[line.id]?.status === 'accepted').length;
     const progress = session.recordingStarted ? ` · ${accepted}/${lines.length} accepted` : ` · ${plural(lines.length, 'line')}`;
-    row.status.textContent = owner ? `${owner.nickname}${owner.connected ? '' : ' (offline)'}${owner.ready && session.state === 'assignment' ? ' · ready' : ''}${progress}` : `No player yet${progress}`;
+    const ownerKey = owner ? `${owner.id}:${owner.nickname}:${owner.color}:${owner.marker}:${owner.avatar}` : '';
+    if (row.ownerKey !== ownerKey) { row.ownerKey = ownerKey; row.owner.replaceChildren(...(owner ? [renderPlayerChip(owner, { size: 20 })] : [])); }
+    row.status.textContent = owner ? `${owner.connected ? 'Online' : 'Offline'}${owner.ready && session.state === 'assignment' ? ' · ready' : ''}${progress}` : `No player yet${progress}`;
     if (document.activeElement !== row.select) row.select.value = ownerId || '';
     if (!pendingButtons.has(row.select)) row.select.disabled = session.state === 'playback' || session.state === 'lobby' || !session.players.length;
     row.element.classList.toggle('is-free', !owner);
@@ -622,7 +655,7 @@ function renderLineAssignmentRows(containerId, session) {
   const container = $(containerId); const pack = session.pack;
   let view = roleViews.get(containerId);
   if (!view) { view = new Map(); roleViews.set(containerId, view); }
-  const rosterKey = JSON.stringify(session.players.map(player => [player.id, player.nickname, player.connected]));
+  const rosterKey = JSON.stringify(session.players.map(player => [player.id, player.nickname, player.connected, player.color, player.marker, player.avatar]));
   // Outside role selection only unfinished lines are worth moving.
   const onlyOpen = containerId !== 'line-assignments';
   for (const [index, line] of pack.lines.entries()) {
@@ -631,19 +664,22 @@ function renderLineAssignmentRows(containerId, session) {
       const element = node('div', undefined, 'role-row line-assignment-row'); const info = node('div', undefined, 'role-info');
       const name = node('strong', `#${index + 1} · ${line.character}`); const caption = node('small', line.caption.length > 90 ? `${line.caption.slice(0, 87)}…` : line.caption);
       caption.title = line.caption;
-      const status = node('small'); info.append(name, caption, status);
+      const ownerChip = node('span', undefined, 'role-owner'); const status = node('small'); info.append(name, caption, ownerChip, status);
       const select = node('select'); select.setAttribute('aria-label', `Player for line ${index + 1}, ${line.character}`);
       select.addEventListener('change', () => quietly(action('assign-line', { lineId: line.id, playerId: select.value }, select, undefined, `line:${line.id}`)));
       select.addEventListener('blur', () => { if (client.state) renderLineAssignmentRows(containerId, client.state.session); });
-      element.append(info, select); container.append(element); row = { element, name, caption, status, select, rosterKey: null }; view.set(line.id, row);
+      element.append(info, select); container.append(element); row = { element, name, caption, owner: ownerChip, status, select, rosterKey: null, ownerKey: null }; view.set(line.id, row);
     }
     if (row.rosterKey !== rosterKey && document.activeElement !== row.select) { fillPlayerOptions(row.select, session); row.rosterKey = rosterKey; }
     const ownerId = session.lineAssignments?.[line.id] || ''; const owner = session.players.find(player => player.id === ownerId);
     const take = session.lineTakes[line.id];
-    row.status.textContent = `${owner ? `${owner.nickname}${owner.connected ? '' : ' (offline)'}` : 'No player yet'} · ${take?.status === 'accepted' ? 'accepted' : take?.status === 'recorded' ? 'needs review' : 'no take yet'}`;
+    const lineOwnerKey = owner ? `${owner.id}:${owner.nickname}:${owner.color}:${owner.marker}:${owner.avatar}` : '';
+    if (row.ownerKey !== lineOwnerKey) { row.ownerKey = lineOwnerKey; row.owner.replaceChildren(...(owner ? [renderPlayerChip(owner, { size: 20 })] : [])); }
+    row.status.textContent = `${owner ? (owner.connected ? 'Online' : 'Offline') : 'No player yet'} · ${take?.status === 'accepted' ? 'accepted' : take?.status === 'recorded' ? 'needs review' : 'no take yet'}`;
     if (document.activeElement !== row.select) row.select.value = ownerId;
     if (!pendingButtons.has(row.select)) row.select.disabled = !session.players.length || ['lobby', 'playback'].includes(session.state);
     row.element.classList.toggle('is-free', !owner);
+    row.element.classList.toggle('is-blind', !!session.blindLines?.[line.id]);
     row.element.classList.toggle('is-offline', !!owner && !owner.connected && take?.status !== 'accepted');
     row.element.hidden = onlyOpen && take?.status === 'accepted';
   }
@@ -668,7 +704,7 @@ function renderPlayers(containerId, session) {
     const row = node('article', undefined, 'player-row');
     row.classList.toggle('is-offline', !player.connected);
     const heading = node('div', undefined, 'player-heading');
-    heading.append(node('strong', player.nickname), node('span', player.connected ? 'Online' : 'Offline', player.connected ? 'presence connected' : 'presence'));
+    heading.append(renderPlayerChip(player, { size: 28 }), node('span', player.connected ? 'Online' : 'Offline', player.connected ? 'presence connected' : 'presence'));
     const progress = node('progress'); progress.max = Math.max(1, player.progress.totalAssignedLines); progress.value = player.progress.completedLines;
     progress.setAttribute('aria-label', `${player.nickname}: ${player.progress.completedLines} of ${player.progress.totalAssignedLines} lines accepted`);
     const [statusText, statusClass] = playerStatus(player, session, lineMode);
@@ -732,18 +768,23 @@ function renderReview(session) {
   const filterLabels = { all: `All lines (${session.totalLineCount})`, recorded: `Needs review (${toReview})`, pending: `Missing (${missing})`, accepted: `Accepted (${accepted})` };
   for (const option of $('line-filter').options) option.textContent = filterLabels[option.value];
   const activeRetakes = session.activeRetakes || [];
-  const inReview = session.state === 'review';
+  const inReview = ['review', 'reveal'].includes(session.state);
+  const secret = !!session.secretsActive;
   if (!pendingButtons.has($('accept-all'))) $('accept-all').disabled = !toReview || !['recording', 'review'].includes(session.state);
   $('accept-all').hidden = !toReview;
   $('accept-all').textContent = `Accept ${toReview > 1 ? `all ${toReview} recorded takes` : 'the recorded take'}`;
   $('continue-recording').hidden = !inReview || accepted >= session.totalLineCount;
-  $('review-playback').disabled = accepted < session.totalLineCount || !inReview || activeRetakes.length > 0;
+  $('reveal-blind').hidden = !secret || !['review', 'recording'].includes(session.state);
+  if (!pendingButtons.has($('reveal-blind'))) $('reveal-blind').disabled = activeRetakes.length > 0 || session.state !== 'review';
+  $('review-playback').disabled = accepted < session.totalLineCount || !inReview || activeRetakes.length > 0 || secret;
   $('skip-missing').hidden = !inReview || accepted >= session.totalLineCount;
-  $('skip-missing').disabled = activeRetakes.length > 0;
+  $('skip-missing').disabled = activeRetakes.length > 0 || secret;
   $('next-match-review').disabled = !inReview;
   $('next-match-review').hidden = !inReview;
   $('review-hint').textContent = ['recording', 'paused'].includes(session.state)
     ? 'Players are still recording. You can already listen to, accept, or retake uploaded takes here.'
+    : secret && inReview ? 'Blind lines are still hidden from players. Press Reveal blind lines when you are ready; then start the final playback.'
+    : session.state === 'reveal' ? 'Everything is revealed on the players\' screens. Start the final playback when you are ready.'
     : activeRetakes.length ? 'Waiting for a retake to finish before playback can start.'
     : toReview && !missing ? `Accept or retake ${plural(toReview, 'take')} to start the final playback.`
     : toReview || missing ? `${plural(session.totalLineCount - accepted, 'line')} without an accepted take. Accept them, continue recording, or play without them.`
@@ -798,6 +839,7 @@ function renderTakes(session) {
     row.audio.hidden = !take; row.placeholder.hidden = !!take;
     row.accept.hidden = take?.status !== 'recorded';
     if (!pendingButtons.has(row.accept)) row.accept.disabled = !['recording', 'review'].includes(session.state);
+    row.element.classList.toggle('is-blind', !!session.blindLines?.[line.id]);
     row.retake.hidden = !take;
     if (!pendingButtons.has(row.retake)) row.retake.disabled = session.state === 'playback';
     row.element.dataset.status = status;

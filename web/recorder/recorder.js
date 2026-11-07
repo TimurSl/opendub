@@ -531,6 +531,7 @@ export class LineRecorder {
     const controller = this.waveformAbort ??= new AbortController();
     let reference = null;
     try {
+      if (line.referenceHidden) throw new Error('Original hidden until the reveal');
       let url = line.referenceAudio;
       let fallback = false;
       if (!url) { url = pack.videoUrl; fallback = true; }
@@ -753,6 +754,8 @@ export class LineRecorder {
   async playOriginal() {
     if (!this.line) return;
     if (this.settings?.referencePlaybackEnabled === false) return;
+    // A blind line's original is secret until the reveal. Never fall back to the scene's own audio either.
+    if (this.line.referenceHidden) return;
     if (this.mode === 'original') { this.stopMedia(); this.status.textContent = this.hasPlaybackTake() ? 'Take ready' : ''; return; }
     if (this.line.referenceAudio) {
       this.reference.src = this.line.referenceAudio;

@@ -1,4 +1,5 @@
 import { node, mediaWarning } from '../shared/api.js';
+import { renderPlayerChip } from '../shared/identity.js';
 
 // A source receives one AudioContext start command; overlapping windows naturally mix.
 export function audioWindow(startTime, duration, bufferDuration, position, contextStart) {
@@ -8,6 +9,34 @@ export function audioWindow(startTime, duration, bufferDuration, position, conte
   return { when: contextStart + Math.max(0, startTime - position), offset, duration: remaining };
 }
 
+// The accepted take that is speaking at `timeline` seconds (latest-starting wins
+// when lines overlap). Uses the recorder profile captured when the take was
+// accepted, so later profile edits do not rewrite history.
+export function speakerAt(session, timeline) {
+  let found = null;
+  for (const line of session?.pack?.lines ?? []) {
+    const take = session.lineTakes?.[line.id];
+    if (take?.status !== 'accepted' || !take.recorder) continue;
+    if (timeline >= line.startTime && timeline <= line.endTime + (take.tail || 0) && (!found || line.startTime >= found.line.startTime)) found = { line, take };
+  }
+  return found ? { recorder: found.take.recorder, character: found.take.character } : null;
+}
+
+// The line being spoken at `timeline` seconds, with its written caption. Used for the live
+// "Original subtitles": what the line was meant to say, not a transcript of the take.
+export function captionAt(session, timeline) {
+  let found = null;
+  for (const line of session?.pack?.lines ?? []) {
+    if (!line.caption || timeline < line.startTime || timeline > line.endTime) continue;
+    if (!found || line.startTime >= found.startTime) found = line;
+  }
+  return found ? { caption: found.caption, character: found.character } : null;
+}
+// Only matches with blind lines offer the toggle: the host can always see captions elsewhere.
+export function hasBlindLines(session) {
+  return !!session?.pack?.lines?.some(line => line.blind) || Object.keys(session?.blindLines ?? {}).length > 0;
+}
+
 export class DubPlayback {
   constructor(root, client, onError, { player = false } = {}) {
     this.client = client; this.onError = onError; this.player = player; this.context = null; this.buffers = new Map();
@@ -15,6 +44,17 @@ export class DubPlayback {
     this.playIntent = false; this.playCommand = 0; this.failedKey = null; this.reportedFailedKey = null;
     this.video = node('video'); this.video.muted = true; this.video.playsInline = true; this.video.preload = 'metadata';
     this.video.setAttribute('aria-label', 'Finished dub visuals');
+    this.subtitlesOn = false;
+    this.subtitleTools = node('div', undefined, 'subtitle-tools'); this.subtitleTools.hidden = true;
+    this.subtitleButton = node('button', 'ORIGINAL SUBTITLES', 'subtitle-toggle secondary'); this.subtitleButton.type = 'button';
+    this.subtitleButton.setAttribute('aria-pressed', 'false');
+    this.subtitleLine = node('p', undefined, 'subtitle-line'); this.subtitleLine.hidden = true; this.subtitleLine.setAttribute('aria-live', 'off');
+    this.subtitleButton.addEventListener('click', () => {
+      this.subtitlesOn = !this.subtitlesOn; this.subtitleButton.setAttribute('aria-pressed', String(this.subtitlesOn));
+      this.subtitleKey = null; if (!this.subtitlesOn) this.showSubtitle(null);
+    });
+    this.subtitleTools.append(this.subtitleLine, this.subtitleButton);
+    this.speaker = node('div', undefined, 'speaker-badge'); this.speaker.hidden = true; this.speaker.setAttribute('aria-live', 'off');
     this.actions = node('div', undefined, 'actions');
     this.status = node('p', player ? '' : 'Load a pack to prepare playback.', 'recorder-status'); this.status.setAttribute('role', 'status');
     if (player) {
@@ -24,7 +64,7 @@ export class DubPlayback {
         if (this.runningId || this.playIntent) this.pausePlayer();
         else this.playPlayer().catch(() => {});
       });
-      this.actions.append(this.playButton); root.append(this.video, this.actions, this.status);
+      this.actions.append(this.playButton); root.append(this.video, this.speaker, this.subtitleTools, this.actions, this.status);
       this.video.addEventListener('error', () => {
         this.videoFailed = true;
         this.suppressedId = this.session?.playback?.id; this.playIntent = false; this.stop();
@@ -38,7 +78,7 @@ export class DubPlayback {
     this.prepareButton = node('button', 'Prepare playback', 'secondary');
     this.resumeButton = node('button', 'Enable audio / catch up', 'secondary'); this.resumeButton.hidden = true;
     this.stopButton = node('button', 'Stop on this device', 'secondary'); this.stopButton.disabled = true;
-    this.actions.append(this.prepareButton, this.resumeButton, this.stopButton); root.append(this.warning, this.video, this.actions, this.status);
+    this.actions.append(this.prepareButton, this.resumeButton, this.stopButton); root.append(this.warning, this.video, this.speaker, this.subtitleTools, this.actions, this.status);
     this.prepareButton.addEventListener('click', () => this.prepare().catch(onError));
     this.resumeButton.addEventListener('click', () => this.resume().catch(onError));
     this.stopButton.addEventListener('click', () => { this.suppressedId = this.session?.playback?.id; this.stop(); this.status.textContent = 'Stopped on this device. Click Enable audio / catch up to rejoin.'; this.resumeButton.hidden = !this.session?.playback; });
@@ -53,6 +93,7 @@ export class DubPlayback {
   setState(snapshot) {
     if (this.player) { this.setPlayerState(snapshot); return; }
     const previous = this.session; this.session = snapshot.session;
+    this.subtitleTools.hidden = !hasBlindLines(this.session);
     const pack = this.session.pack;
     this.prepareButton.disabled = !pack || this.preparing;
     if (previous?.matchId !== this.session.matchId || previous?.pack?.id !== pack?.id || previous?.pack?.videoUrl !== pack?.videoUrl) {
@@ -121,6 +162,7 @@ export class DubPlayback {
   }
   setPlayerState(snapshot) {
     const previous = this.session; this.session = snapshot.session;
+    this.subtitleTools.hidden = !hasBlindLines(this.session);
     const pack = this.session.pack;
     if (previous?.id !== this.session.id || previous?.matchId !== this.session.matchId || previous?.pack?.id !== pack?.id || previous?.pack?.videoUrl !== pack?.videoUrl) {
       this.playCommand++; this.playIntent = false; this.suppressedId = null; this.stop();
@@ -308,6 +350,8 @@ export class DubPlayback {
       if (this.runningId !== playback.id) return;
       const timeline = context.currentTime - anchor;
       if (timeline >= Math.max(finish, Number.isFinite(this.video.duration) ? this.video.duration : 0)) { this.suppressedId = playback.id; this.playIntent = false; this.stop(); this.status.textContent = this.player ? 'Movie finished.' : 'Playback finished.'; return; }
+      this.showSpeaker(timeline >= 0 ? timeline : null);
+      this.showSubtitle(timeline >= 0 ? timeline : null);
       if (timeline < 0) this.status.textContent = this.player ? 'Starting soon…' : `Shared playback starts in ${Math.ceil(-timeline)} seconds…`;
       else {
         this.status.textContent = this.player ? '' : 'Playing the completed dub.';
@@ -326,6 +370,20 @@ export class DubPlayback {
     };
     this.frame = requestAnimationFrame(step);
   }
+  showSubtitle(timeline) {
+    const current = this.subtitlesOn && timeline != null ? captionAt(this.session, timeline) : null;
+    const key = current ? `${current.character}:${current.caption}` : '';
+    if (this.subtitleKey === key) return;
+    this.subtitleKey = key; this.subtitleLine.hidden = !current;
+    this.subtitleLine.textContent = current ? `${current.character}: ${current.caption}` : '';
+  }
+  showSpeaker(timeline) {
+    const current = timeline == null ? null : speakerAt(this.session, timeline);
+    const key = current ? `${current.recorder.id}:${current.recorder.nickname}:${current.recorder.color}:${current.recorder.avatar}:${current.character}` : '';
+    if (this.speakerKey === key) return;
+    this.speakerKey = key; this.speaker.replaceChildren(); this.speaker.hidden = !current;
+    if (current) this.speaker.append(renderPlayerChip(current.recorder, { size: 32, label: `${current.recorder.nickname} · ${current.character}` }));
+  }
   schedule(buffer, window) {
     if (!window) return;
     const source = this.context.createBufferSource(); source.buffer = buffer; source.connect(this.context.destination);
@@ -333,7 +391,7 @@ export class DubPlayback {
   }
   stop() {
     cancelAnimationFrame(this.frame); this.sources.forEach(source => { try { source.stop(); } catch {} source.disconnect(); });
-    this.sources = []; this.runningId = null; this.video.pause();
+    this.sources = []; this.runningId = null; this.video.pause(); this.showSpeaker(null); this.showSubtitle(null);
     if (this.player) this.updatePlayerControls(); else this.stopButton.disabled = true;
   }
 }

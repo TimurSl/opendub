@@ -3,6 +3,8 @@ import { LineRecorder } from '../recorder/recorder.js';
 import { DubPlayback } from '../playback/playback.js';
 import { canRecordSelectedLine } from './eligibility.js';
 import { roleView } from './view-state.js';
+import { renderPlayerChip, renderProfilePicker, loadProfileChoice, saveProfileChoice } from '../shared/identity.js';
+import { colorHex } from '../shared/identity-data.js';
 
 const $ = id => document.getElementById(id);
 const client = new RuntimeClient('player');
@@ -22,6 +24,8 @@ function friendlyMessage(problem) {
   ]).has(message)) return message;
   if (/origin|cross-site|proxy protocol/i.test(message)) return 'The host needs to check the proxy connection settings before you can join.';
   if (/already taken/i.test(message)) return 'Someone claimed that character first. Choose another one.';
+  if (/take limit/i.test(message)) return 'You have used all your takes for this line. Ask the host if you need another.';
+  if (/turned off player retakes/i.test(message)) return 'The host turned off retakes for this match.';
   if (/role limit/i.test(message)) return 'You have reached your role limit. Release a character before choosing another.';
   if (/host is assigning/i.test(message)) return 'The host is choosing roles. Wait for an assignment.';
   if (/locked/i.test(message)) return 'The host is getting ready to start. Try READY again.';
@@ -75,14 +79,100 @@ $('join-form').hidden = !hasInvitation; $('join-heading').hidden = !hasInvitatio
 $('invitation-missing').hidden = hasInvitation;
 if (!hasInvitation) $('pack-title').textContent = 'Join the dub';
 
+const joinChoice = loadProfileChoice();
+const joinPicker = renderProfilePicker($('join-profile-picker'), { ...joinChoice, onChange: saveProfileChoice });
 $('join-form').addEventListener('submit', async event => {
   event.preventDefault(); clearNotice(); $('join-button').disabled = true;
   try {
-    await client.request('/api/join', { roomId, joinToken, nickname: $('nickname').value.trim() });
+    const { color, avatar } = joinPicker.get();
+    await client.request('/api/join', { roomId, joinToken, nickname: $('nickname').value.trim(), ...(color ? { color } : {}), ...(avatar ? { avatar } : {}) });
     await client.start();
   } catch (problem) { error(problem); }
   finally { $('join-button').disabled = false; }
 });
+async function startExport(format) {
+  const button = $(format === 'mp4' ? 'export-video' : 'export-audio'); button.disabled = true; clearNotice();
+  try { await client.request('/api/exports', { format }); $('export-status').textContent = 'Rendering. This page updates when it is ready.'; }
+  catch (problem) { error(problem); }
+  finally { button.disabled = false; }
+}
+$('export-video').addEventListener('click', () => startExport('mp4'));
+$('export-audio').addEventListener('click', () => startExport('m4a'));
+function renderExports(snapshot, visible) {
+  const { session } = snapshot;
+  const show = visible && !!session.exportsAllowed && ['review', 'playback'].includes(session.state) && !!session.pack;
+  $('exports-section').hidden = !show;
+  if (!show) return;
+  const mine = (queueLines => queueLines.some(id => session.lineTakes[id]?.status === 'accepted'))(snapshot.queue?.lines || []);
+  $('export-mine').hidden = !mine;
+  const list = $('export-jobs'); list.replaceChildren();
+  for (const job of session.exports || []) {
+    const row = node('li', undefined, 'export-job'); const label = job.format === 'mp4' ? 'Video' : 'Audio';
+    row.append(node('span', label));
+    if (job.status === 'ready') { const link = node('a', 'DOWNLOAD', 'button-link'); link.href = job.url; link.download = job.filename; row.append(link); }
+    else if (job.status === 'failed') row.append(node('span', 'This export failed. Ask the host to try again.', 'job-error'));
+    else { const bar = node('progress'); bar.max = 1; bar.value = job.status === 'queued' ? 0 : job.progress; bar.setAttribute('aria-label', label + ' export progress'); row.append(bar); }
+    list.append(row);
+  }
+}
+// The reveal: every blind line shown with what was written, the original, and the take.
+function renderReveal(snapshot, visible) {
+  const { session } = snapshot; const panel = $('reveal-panel');
+  panel.hidden = !visible || !session.pack;
+  if (panel.hidden) return;
+  const lines = session.pack.lines.filter(line => line.blind);
+  const key = JSON.stringify([session.matchId, lines.map(line => [line.id, session.lineTakes[line.id]?.id])]);
+  if (panel.dataset.key === key) return;
+  panel.dataset.key = key;
+  const list = $('reveal-list'); list.replaceChildren();
+  for (const line of lines) {
+    const take = session.lineTakes[line.id];
+    const item = node('article', undefined, 'reveal-item');
+    const head = node('div', undefined, 'reveal-head');
+    head.append(node('strong', `LINE ${session.pack.lines.indexOf(line) + 1} · ${line.character}`));
+    if (take?.recorder) head.append(renderPlayerChip(take.recorder, { size: 24 }));
+    item.append(head, node('p', line.caption, 'caption'));
+    const players = node('div', undefined, 'reveal-audio');
+    const add = (label, url) => { const wrap = node('label', label); const audio = node('audio'); audio.controls = true; audio.preload = 'none'; audio.src = url; wrap.append(audio); players.append(wrap); };
+    if (take) add('The take', take.url);
+    item.append(players); list.append(item);
+  }
+  if (!lines.length) list.append(node('p', 'Nothing was hidden in this match.', 'muted'));
+}
+let profilePicker = null; let profileEditorOpen = false;
+async function changeProfile(patch) {
+  const status = $('profile-status');
+  try { await client.request('/api/player/profile', patch); status.textContent = ''; }
+  catch (problem) {
+    if (problem.status === 409 && problem.suggestion) {
+      status.textContent = 'That color is taken, so the next free one was chosen.';
+      try { await client.request('/api/player/profile', { ...patch, color: problem.suggestion }); } catch (retry) { error(retry); }
+    } else error(problem);
+  }
+  if (client.state) render(client.state);
+}
+$('profile-toggle').addEventListener('click', () => {
+  profileEditorOpen = !profileEditorOpen;
+  $('profile-editor').hidden = !profileEditorOpen; $('profile-toggle').setAttribute('aria-expanded', String(profileEditorOpen));
+});
+function renderProfile(snapshot, visible) {
+  const { session } = snapshot; const me = session.players.find(item => item.id === snapshot.viewer.playerId);
+  $('profile-panel').hidden = !visible || !me;
+  if (!visible || !me) return;
+  $('profile-chip').replaceChildren(renderPlayerChip(me, { size: 32, label: me.nickname }));
+  const taken = new Set(session.players.filter(item => item.id !== me.id).map(item => item.color));
+  if (!profilePicker) {
+    profilePicker = renderProfilePicker($('profile-picker'), { color: me.color, avatar: me.avatar, taken, onChange: ({ color, avatar }) => {
+      const current = client.state?.session.players.find(item => item.id === client.state.viewer.playerId);
+      const patch = {}; if (color !== current?.color) patch.color = color; if ((avatar || '') !== (current?.avatar || '')) patch.avatar = avatar || '';
+      if (Object.keys(patch).length) { saveProfileChoice({ color, avatar }); changeProfile(patch); }
+    } });
+  } else profilePicker.set({ color: me.color, avatar: me.avatar, taken });
+  const roster = $('roster'); roster.replaceChildren();
+  for (const other of session.players) {
+    const chip = renderPlayerChip(other, { size: 24 }); chip.setAttribute('role', 'listitem'); chip.classList.toggle('offline', !other.connected); roster.append(chip);
+  }
+}
 function roleKey(snapshot) {
   return JSON.stringify([snapshot.session.id, snapshot.session.matchId, snapshot.session.pack?.id, snapshot.viewer.playerId, snapshot.session.settings?.gameMode, [...(snapshot.queue?.assignedCharacters || [])].sort(), [...(snapshot.queue?.lines || [])]]);
 }
@@ -249,7 +339,12 @@ function render(snapshot) {
   $('recording-panel').hidden = !recording;
   $('recording-microphone-help').hidden = !recording || microphoneReady();
   $('playback-panel').hidden = !finalPlayback;
-  $('waiting-panel').hidden = showRoles || recording || finalPlayback;
+  const revealing = session.state === 'reveal';
+  $('waiting-panel').hidden = showRoles || recording || finalPlayback || revealing;
+  renderReveal(snapshot, revealing);
+  renderProfile(snapshot, !recording && !finalPlayback);
+  renderExports(snapshot, !recording);
+  $('recording-panel').style.setProperty('--chip', colorHex(player?.color));
   const showLineNavigation = hasTasks && ['recording', 'review', 'paused'].includes(session.state);
   $('line-navigation').hidden = !showLineNavigation;
   const picker = $('line-picker'); const selectedWasFocused = document.activeElement === picker;
@@ -262,7 +357,8 @@ function render(snapshot) {
     const index = pack.lines.indexOf(item); const accepted = session.lineTakes[item.id]?.status === 'accepted';
     const replacement = session.replacementTakes?.[item.id];
     const status = replacement ? 'Replacement ready' : accepted ? 'Accepted' : session.lineTakes[item.id]?.status === 'recorded' ? 'Ready for NEXT' : 'Needs a take';
-    const caption = item.caption.length > 48 ? `${item.caption.slice(0, 45)}…` : item.caption;
+    const shown = item.captionHidden ? '???' : item.caption;
+    const caption = shown.length > 48 ? `${shown.slice(0, 45)}…` : shown;
     const option = node('option', `LINE ${index + 1} · ${item.character} · ${caption} · ${status}`);
     option.value = item.id; picker.append(option);
   }
@@ -284,9 +380,15 @@ function render(snapshot) {
   if (viewLine) recorder.setTakes(session.lineTakes[line.id], session.lineTakes[line.id]?.status === 'accepted' ? session.lineTakes[line.id] : null, session.replacementTakes?.[line.id]);
   if (recording) {
     $('line-number').hidden = false;
-    $('line-number').textContent = `LINE ${queue.lines.indexOf(line.id) + 1} / ${queue.lines.length}`;
+    const blindNow = !!line.blind && !!session.secretsActive;
+    $('line-number').textContent = `LINE ${queue.lines.indexOf(line.id) + 1} / ${queue.lines.length}${blindNow ? ' · BLIND' : ''}`;
     $('line-character').textContent = line.character;
-    $('line-caption').textContent = line.caption;
+    $('line-caption').textContent = line.captionHidden ? '???' : line.caption;
+    // Hidden controls are removed, not disabled, so the layout does not hint at what is missing.
+    $('original').hidden = !!line.referenceHidden;
+    $('waveform-legend').querySelector('span:first-child').hidden = !!line.referenceHidden;
+    $('waveform-status').hidden = !!line.referenceHidden;
+    $('recording-panel').classList.toggle('scene-blind', blindNow && !!line.blind.scene);
     if (visibleMode !== 'recording') requestAnimationFrame(() => recorder.drawWaveform());
   } else $('line-number').hidden = true;
   if (showRoles) {
@@ -351,7 +453,7 @@ document.addEventListener('keydown', event => {
   if (target?.matches?.('input,textarea,select,[contenteditable="true"],button')) return;
   if ($('recording-panel').hidden) return;
   const control = ({ o: 'original', r: 'record', t: 'my-take', n: 'next' })[event.key.toLowerCase()];
-  if (!control || $(control).disabled) return;
+  if (!control || $(control).disabled || $(control).hidden) return;
   event.preventDefault(); $(control).click();
 });
 

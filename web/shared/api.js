@@ -7,7 +7,7 @@ export class RuntimeClient extends EventTarget {
   async request(path, body, { multipart = false, method, retakeId, takeTiming } = {}) {
     const matchId = this.state?.session?.matchId;
     const partyOnly = ['/api/admin/packs', '/api/admin/login', '/api/admin/create-party', '/api/admin/next-match', '/api/admin/select', '/api/admin/settings'].includes(path);
-    const matchScoped = path.startsWith('/api/player/') || /^\/api\/takes\/[^/]+(?:\/accept|\/retake(?:\/cancel)?|\/discard)?$/.test(path) || (path.startsWith('/api/admin/') && !partyOnly);
+    const matchScoped = (path.startsWith('/api/player/') && path !== '/api/player/profile') || /^\/api\/takes\/[^/]+(?:\/accept|\/retake(?:\/cancel)?|\/discard)?$/.test(path) || (path.startsWith('/api/admin/') && !partyOnly);
     if (body !== undefined && !multipart && matchId && matchScoped) {
       body = { ...body, matchId };
     }
@@ -27,7 +27,7 @@ export class RuntimeClient extends EventTarget {
     });
     let result;
     try { result = await response.json(); } catch { throw new Error(`Server returned ${response.status}.`); }
-    if (!response.ok) { const error = new Error(result.error || `Request failed (${response.status}).`); error.status = response.status; throw error; }
+    if (!response.ok) { const error = new Error(result.error || `Request failed (${response.status}).`); error.status = response.status; if (result.suggestion) error.suggestion = result.suggestion; throw error; }
     if (result.type === 'state') this.receive(result);
     return result;
   }

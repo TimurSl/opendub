@@ -161,3 +161,34 @@ h2 { margin-bottom: 22px; font-size: clamp(28px, 4vw, 42px); font-weight: 550; l
 .soundpad-import { display: flex; justify-content: center; margin: 12px auto 4px; }
 .soundpad-import button { min-height: 43px; padding: 8px 20px; font-size: 13px; white-space: nowrap; }
 .soundpad-help { text-align: center; margin: 0 auto 14px; font-size: 12px; max-width: 620px; }
+
+.profile-fieldset { margin: 14px 0; padding: 0; border: 0; }
+.profile-fieldset legend { padding: 0; font-weight: 650; }
+.profile-panel { margin: 0 0 18px; }
+.profile-me { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.profile-me button { min-height: 44px; padding: 8px 14px; }
+.roster { display: flex; flex-wrap: wrap; gap: 8px; }
+.roster .player-chip.offline { opacity: .5; }
+.recording-panel { border-top: 4px solid var(--chip, transparent); padding-top: 10px; }
+
+.exports-section { margin: 18px 0; padding: 14px; border: 1px solid var(--border); border-radius: 6px; }
+.exports-section h3 { margin: 0 0 10px; font-size: 17px; }
+.exports-section .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.exports-section button, .exports-section .button-link { min-height: 48px; padding: 8px 14px; }
+.button-link { display: inline-flex; align-items: center; border: 1px solid #626262; border-radius: 5px; color: var(--ink); background: var(--surface); font-size: 15px; font-weight: 650; text-decoration: none; letter-spacing: .04em; }
+.export-jobs { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.export-job { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.export-job progress { flex: 1 1 120px; }
+.job-error { color: #ff8f8f; }
+
+.reveal-panel { margin: 18px 0; }
+.reveal-list { display: grid; gap: 14px; }
+.reveal-item { padding: 14px; border: 1px solid var(--border); border-radius: 6px; }
+.reveal-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.reveal-item .caption { margin: 8px 0; }
+.reveal-audio { display: grid; gap: 8px; }
+.reveal-audio label { display: grid; gap: 4px; font-size: 14px; color: var(--muted); }
+.reveal-audio audio { width: 100%; }
+.scene-blind .video-frame video { visibility: hidden; }
+.scene-blind .video-frame { min-height: 96px; }
+.scene-blind .video-frame::before { content: "Scene hidden: listen for your timing"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 8px; color: var(--muted); font-size: 14px; text-align: center; }

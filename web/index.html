@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#121212">
   <title>Open Dub</title>
   <link rel="stylesheet" href="/player/styles.css">
+  <link rel="stylesheet" href="/shared/identity.css">
 </head>
 <body>
   <a href="#stage" class="skip-link">Skip to recording</a>
@@ -21,10 +22,19 @@
       <form id="join-form" class="join-form">
         <label for="nickname">Your name</label>
         <input id="nickname" name="nickname" autocomplete="nickname" maxlength="40" aria-describedby="notice" required>
+        <fieldset class="profile-fieldset"><legend>Your look</legend><div id="join-profile-picker"></div></fieldset>
         <button id="join-button" type="submit">JOIN</button>
       </form>
     </section>
     <div id="room-panel" hidden>
+      <section id="profile-panel" class="profile-panel" hidden aria-label="Players">
+        <div class="profile-me"><span id="profile-chip"></span><button id="profile-toggle" type="button" class="secondary" aria-expanded="false" aria-controls="profile-editor">EDIT LOOK</button></div>
+        <div id="profile-editor" class="profile-editor" hidden>
+          <div id="profile-picker"></div>
+          <p id="profile-status" class="help" role="status" aria-live="polite"></p>
+        </div>
+        <div id="roster" class="roster" role="list" aria-label="Players in the party"></div>
+      </section>
       <section id="role-panel" class="roles-screen" hidden aria-labelledby="role-title">
         <div class="section-intro"><p class="eyebrow">ASSIGNMENT</p><h2 id="role-title" tabindex="-1">Choose your characters</h2><p id="role-help">Choose at least one character, then check your microphone.</p><p id="role-counts" class="role-counts" aria-live="polite"></p></div>
         <div id="character-options" class="character-options" role="list" aria-label="Pack characters"></div>
@@ -40,6 +50,11 @@
         <h2 id="waiting-title" tabindex="-1">Waiting for the host</h2>
         <p id="waiting-message">The host is getting the recording ready.</p>
         <p id="waiting-detail" hidden></p>
+      </section>
+      <section id="reveal-panel" class="reveal-panel" hidden aria-labelledby="reveal-title">
+        <p class="eyebrow">REVEAL</p><h2 id="reveal-title">What was really said</h2>
+        <p class="help">Compare what was written with what each player said. Turn on ORIGINAL SUBTITLES during the final playback to read the line as it plays.</p>
+        <div id="reveal-list" class="reveal-list"></div>
       </section>
       <section id="line-navigation" class="line-navigation" hidden aria-label="Assigned line navigation">
         <label for="line-picker">Go to your line</label>
@@ -95,6 +110,12 @@
       </section>
       <section id="playback-panel" class="final-screen" hidden aria-label="Watch the final dub">
         <div id="playback-root"></div>
+      </section>
+      <section id="exports-section" class="exports-section" hidden aria-labelledby="exports-heading">
+        <h3 id="exports-heading">Take the dub home</h3>
+        <div class="actions"><button id="export-video" type="button">VIDEO (MP4)</button><button id="export-audio" type="button">AUDIO (M4A)</button><a class="button-link" href="/exports/takes.zip" download>ALL TAKES</a><a id="export-mine" class="button-link" href="/exports/mine.zip" download>MY TAKES</a></div>
+        <p id="export-status" class="help" role="status" aria-live="polite"></p>
+        <ul id="export-jobs" class="export-jobs" aria-label="Exports"></ul>
       </section>
     </div>
   </main>

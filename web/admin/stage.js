@@ -1,6 +1,6 @@
 export function currentStage(session) {
   if (!session.partyCreated || !session.pack) return 1;
-  return ({ lobby: 2, assignment: 3, recording: 4, paused: 4, review: 5, playback: 6 })[session.state] || 2;
+  return ({ lobby: 2, assignment: 3, recording: 4, paused: 4, review: 5, reveal: 5, playback: 6 })[session.state] || 2;
 }
 
 // The furthest stage the host may open. While players record, the Review

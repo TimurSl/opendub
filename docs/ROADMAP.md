@@ -1,6 +1,6 @@
 # Gameplay and library roadmap
 
-Status: **plan, not implemented**. This document covers six features:
+Status: **in progress**. See [Implementation status](#implementation-status) for what has shipped. This document covers six features:
 
 1. [Avatars and colors](#1-avatars-and-colors)
 2. [Dub library (automatic save of every game)](#2-dub-library)
@@ -10,6 +10,19 @@ Status: **plan, not implemented**. This document covers six features:
 6. [Handicaps and cards](#6-handicaps-and-cards)
 
 Each section builds on the current architecture in [DESIGN.md](DESIGN.md): one in-memory party in `server/session/store.js`, full-state WebSocket snapshots, one ownership function (`ownerForLine`), and a single FFmpeg export in `server/index.js`.
+
+## Implementation status
+
+| Phase | Work | Status |
+| --- | --- | --- |
+| 1 | §1 Avatars and colors | **Done** |
+| 2 | §0.1 rules (take limit, retakes), §2 Library, §3 Export jobs | **Done**, with the gaps listed in each section |
+| 3 | §0.2 redaction, §0.3 reveal, §4 Blind lines | **Done**, with the gaps listed in §4 |
+| 4 | §5 modes: duet, relay, speed, mystery | Not started |
+| 5 | §0.4 server effects, §6 Cards (data-driven decks, batch add in the admin panel) | Not started |
+| 6 | §5 swap (rounds) | Not started |
+
+Deviations from the plan are noted in each section as they are implemented.
 
 ---
 
@@ -101,6 +114,15 @@ Today, voice effects other than Custom run in the browser (an AudioWorklet), and
 
 **Size:** small. **Do this first**, because every later feature shows players.
 
+**Implemented.** Notes on how the plan was realised:
+
+- Allowlists live in `web/shared/identity-data.js`, imported by both the server (validation) and the browser (rendering). Colors are sent as ids and mapped to hex on the client, so no free text reaches CSS. A test checks every color keeps 3:1 contrast on `#121212` and `#ffffff`.
+- Past 12 players, the least-used color is reused and the snapshot's `players[].marker` (`dot`, then `stripe`) tells clients which pattern to draw. Taking a color someone else holds is a 409 only while a free color exists.
+- Joining with a taken color does not fail; the server picks the first free one.
+- Taken-color 409 responses carry `suggestion`, and the client retries with it automatically.
+- The line picker is not colored per owner: a player only ever sees their own lines, so the recording panel gets a top border in the player's color instead. The host's line-assignment rows show each owner's chip.
+- Review-waveform coloring is not done yet, because review waveforms are host-side only today.
+
 ---
 
 ## 2. Dub library
@@ -180,6 +202,14 @@ LibraryEntry = {
 
 **Size:** medium-large. **Risk:** disk usage. Defaults and retention handle it.
 
+**Implemented.** Gaps and deviations:
+
+- Saving, updating, listing, rename/star/delete, retention, validation, local replay, download of takes, and cached renders are done. `server/library.js` has the storage rules.
+- **Not done:** party replay (`scope: 'party'`), the `librarySavePartial` setting, the players' "Past dubs" screen (players can use `GET /api/library` when the host shares it, but there is no list UI yet), and library filtering by anything but pack, player and starred.
+- Finalise-on-shutdown is covered by saving at every commit while the match is in review or playback; `close()` waits for the save queue.
+- There is no `POST /api/library/:id/replay`: local replay is purely client-side on top of `GET /api/library/:id`.
+- `rules` currently holds `mode`, `takeLimit` and `allowPlayerRetakes`. `blind`, `cards` and `lineTimeLimitSec` arrive with the phases that enforce them.
+
 ---
 
 ## 3. Export for players
@@ -212,6 +242,12 @@ LibraryEntry = {
 - `mine.zip` contains only the requester's takes.
 
 **Size:** medium. It shares storage with §2, so build them together.
+
+**Implemented.** Jobs, formats `mp4` and `m4a`, streamed `takes.zip` and `mine.zip`, `exportAccess`, and library-stored renders are done. Notes:
+
+- `takes.zip` and `mine.zip` are streamed directly (not jobs), because there is no temporary file to track.
+- `POST /api/admin/export` stays as a blocking compatibility wrapper that always renders fresh.
+- **Not done:** the credits overlay (drawtext) and share links, both optional in the plan.
 
 ---
 
@@ -251,6 +287,16 @@ The options combine. For example, `caption + reference` gives an improv round, a
 - `share` picks the expected number of lines, and the selection is stable across snapshots.
 
 **Size:** small-medium. It exercises §0.2 and §0.3, which makes it a good first secret rule.
+
+**Implemented.** `server/session/redact.js` holds `redactFor` (pure, unit-tested) and the `/media` check; `reveal` is a real session state between `review` and `playback`. Deviations:
+
+- **Scene blindness is client-side only.** The recorder's cue timing is driven by playing the scene video, so the server cannot withhold the video from players without breaking recording. The video is hidden visually and replaced by a placeholder, timing bar and countdown, but a player using devtools can still fetch it. Caption and reference-audio blindness *are* enforced by the server (text and URL removed from player snapshots, `/media` returns 403 until the reveal).
+- Blind lines never fall back to the scene's own audio for the Original button or waveform.
+- A host retake after the reveal makes all lines blind again until the host reveals again.
+- The live match's library entry is hidden from players until the reveal.
+- Players do get a per-line `blind` flag (and `captionHidden` / `referenceHidden`), because the recorder has to show "???" and a BLIND badge. The host additionally gets the `blindLines` map.
+- **No "listen to the original" anywhere in blind mode.** The reveal screen lists the written caption and the player's take only. Instead, final playback has an **ORIGINAL SUBTITLES** button (shown only when the match had blind lines, off by default, per device) that shows the written line live while the dub plays, timed by each line's start and end. It shows what the line was meant to say, not a transcript of the take.
+- **Not done:** the eye-slash icon (blind lines show a text BLIND tag in the host's lists instead).
 
 ---
 
@@ -313,8 +359,16 @@ Card = {
 
 ### Decks
 
-- The default deck has about 40 cards in `server/session/cards.js`.
-- Host custom cards: performance and effect kinds only. Effect cards go through the same allowlist validator as Custom. They are saved in party settings, and can be exported and imported as JSON for sharing decks.
+**Cards are data, never code.** No card text, title or effect chain is hardcoded in server or client source.
+
+- **Storage:** cards live in a JSON deck store in the data directory (`<data dir>/cards/decks.json`), loaded and validated at startup and written atomically. The runtime is shipped with a default deck as a plain data file (`server/data/default-cards.json`, about 40 cards). On first start it is copied into the store as an ordinary, editable deck; after that the store is the only source of truth, so a host can edit or delete default cards like any other. A "restore default deck" action re-imports the shipped file as a new deck without overwriting the host's own.
+- **Admin panel:** a Cards section with:
+  - **Batch add:** paste many cards at once, either as JSON (an array of cards, the same format as export) or as plain text with one performance card per line (`Title | Text`). A preview shows which rows are valid and why the rest are rejected, and nothing is saved until the host confirms. Imports are all-or-nothing per confirmation, capped in count and size.
+  - List, search, filter by kind, edit, enable or disable, weight, and delete cards.
+  - Create, rename, duplicate, export and import whole decks as JSON, and choose the deck for the match (`rules.cards.deckId`).
+- **Validation:** every card, from batch add or JSON import, goes through one `validateCard` function: known keys only, bounded text lengths, `kind` in the allowed set, bounded `weight`. Effect cards use the same allowlisted FFmpeg filter validator as Custom (§0.4), so a card cannot carry arbitrary FFmpeg arguments. Constraint cards are built from the fixed set of §4/§5 rule keys, not free text.
+- **API:** `GET /api/admin/cards`, `POST /api/admin/cards/batch` (with `{ dryRun: true }` for the preview), `PATCH` and `DELETE /api/admin/cards/:id`, and deck endpoints beside them. Players never read the deck; they only see the cards dealt to them (§0.2).
+- **Snapshotting:** at deal time the match copies the cards it uses into `data.cards`, so editing or deleting a card mid-match changes nothing for a game in progress, and the library entry (§2) keeps the cards that were played.
 - A deck can be filtered by kind, for example "performance only" for groups without FFmpeg.
 
 ### Dealing (`rules.cards.deal`)
@@ -344,7 +398,7 @@ Card = {
 
 - **Player:** a card shown face-up on their own screen while recording (title + text + icon), and collapsible on mobile. Effect cards show "applied automatically after recording".
 - **Reveal:** cards flip over one player at a time, with a guessing grid and a results table.
-- **Host:** a card overview with re-deal and veto buttons, and a custom deck editor in settings.
+- **Host:** a card overview with re-deal and veto buttons, and the Cards section described under Decks (batch add, deck editor, import and export).
 
 ### Tests
 

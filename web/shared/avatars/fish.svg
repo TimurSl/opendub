@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="currentColor"><mask id="m"><rect width="64" height="64" fill="#fff"/><g fill="#000"><circle cx="17" cy="29" r="2.6"/><path d="M30 22 Q36 32 30 42 L33 42 Q39 32 33 22 Z"/></g></mask><g mask="url(#m)"><ellipse cx="28" cy="32" rx="20" ry="13"/><polygon points="46,32 60,20 60,44"/></g></svg>
